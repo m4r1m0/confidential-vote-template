@@ -22,10 +22,13 @@ pub use rcv_tally::TallyMethod;
 /// *who*, not *what*).
 ///
 /// The tally is instant-runoff: count each ballot's highest-ranked still-active candidate; if one
-/// exceeds 50% they win; otherwise eliminate the lowest-count candidate (ties broken by lowest
-/// candidate id for determinism) and repeat. Elections pinned to `TallyMethod::Fptp` instead
+/// exceeds 50% they win; otherwise eliminate the lowest-count candidate (elimination ties
+/// broken by lowest candidate id for determinism) and repeat. A tie between the final two
+/// candidates — like zero turnout, the degenerate tie — yields no winner (`None`), so a tied
+/// election must be re-run. Elections pinned to `TallyMethod::Fptp` instead
 /// count first preferences only (single-winner plurality — see the `new` docs), which covers
-/// plain FPTP elections, yes/no votes (two candidates), and single-choice polls. `result()` is
+/// plain FPTP elections, yes/no votes (two candidates), and single-choice polls; an FPTP tie
+/// for the most votes likewise yields no winner. `result()` is
 /// a deterministic computation over the stored ballots, so the outcome is trustless — any
 /// validator or off-chain reader computes the same winner.
 ///
@@ -126,7 +129,8 @@ pub mod ranked_voting {
     #[derive(Clone, Debug)]
     pub struct FptpResult {
         /// The winning candidate id (most first-preference votes), or `None` if no ballots
-        /// were cast.
+        /// were cast or the most-vote count is shared (a tie — including zero turnout,
+        /// the degenerate tie where every count is 0).
         pub winner: Option<u32>,
         /// First-preference counts per candidate.
         pub counts: BTreeMap<u32, u64>,
@@ -434,7 +438,8 @@ pub mod ranked_voting {
         }
 
         /// First-past-the-post single-winner tally: counts each ballot's first preference; the
-        /// candidate with the most votes wins (no majority required). With exactly two
+        /// candidate with the most votes wins (no majority required). A tie for the most votes
+        /// has no winner, exactly like zero turnout (the degenerate tie). With exactly two
         /// candidates this is a plain yes/no vote. Emits a `ResultFptp` event.
         fn fptp_result(&self) -> FptpResult {
             let (winner, counts) = run_fptp(&self.ballots, self.num_candidates);

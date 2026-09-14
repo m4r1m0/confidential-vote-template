@@ -51,7 +51,9 @@ fn test_majority_first_round() {
 }
 
 #[test]
-fn test_redistribution_changes_winner() {
+fn test_tie_after_redistribution_yields_no_winner() {
+    // Round 1: 0=2, 1=1, 2=1. No majority; 1 is eliminated (unique lowest).
+    // Round 2: 0=2, 2=2. The final two are tied, so there is no winner.
     let ballots = vec![
         ballot(&[0, 2, 1]),
         ballot(&[0, 2, 1]),
@@ -59,17 +61,21 @@ fn test_redistribution_changes_winner() {
         ballot(&[2, 1, 0]),
     ];
     let (winner, rounds) = run_irv(&ballots, 3);
-    assert_eq!(winner, Some(2));
-    assert!(rounds.len() >= 2);
+    assert_eq!(winner, None);
+    assert_eq!(rounds.len(), 2);
     assert_eq!(rounds[0].eliminated, Some(1));
+    assert!(rounds[1].eliminated.is_none());
 }
 
 #[test]
-fn test_tie_break_lowest_id() {
+fn test_final_round_tie_yields_no_winner() {
+    // 1-1 between the final two candidates: a tied outcome, so no winner — the count must not
+    // crown the elimination survivor.
     let ballots = vec![ballot(&[0, 1]), ballot(&[1, 0])];
     let (winner, rounds) = run_irv(&ballots, 2);
-    assert_eq!(winner, Some(1));
-    assert_eq!(rounds[0].eliminated, Some(0));
+    assert_eq!(winner, None);
+    assert_eq!(rounds.len(), 1);
+    assert!(rounds[0].eliminated.is_none());
 }
 
 #[test]
@@ -89,7 +95,10 @@ fn test_single_voter() {
 }
 
 #[test]
-fn test_all_eliminated_until_one_remains() {
+fn test_elimination_ties_continue_until_final_round() {
+    // Round 1: 1-1-1-1, all tied for lowest → lowest id (0) eliminated.
+    // Round 2: 1=2, 2=1, 3=1 → 2 eliminated (lowest id among the tied 2, 3).
+    // Round 3: 1=2, 3=2 — the final two are tied, so there is no winner.
     let ballots = vec![
         ballot(&[0, 1, 2, 3]),
         ballot(&[1, 2, 3, 0]),
@@ -97,8 +106,11 @@ fn test_all_eliminated_until_one_remains() {
         ballot(&[3, 0, 1, 2]),
     ];
     let (winner, rounds) = run_irv(&ballots, 4);
-    assert_eq!(winner, Some(3));
-    assert_eq!(rounds.len(), 4);
+    assert_eq!(winner, None);
+    assert_eq!(rounds.len(), 3);
+    assert_eq!(rounds[0].eliminated, Some(0));
+    assert_eq!(rounds[1].eliminated, Some(2));
+    assert!(rounds[2].eliminated.is_none());
 }
 
 #[test]
@@ -122,7 +134,9 @@ fn test_redistribution_to_second_choice() {
 }
 
 #[test]
-fn test_exactly_fifty_percent_not_majority() {
+fn test_fifty_fifty_final_round_is_no_winner() {
+    // 2-2 between the final two candidates: exactly half is not a majority and the tie means
+    // there is no winner.
     let ballots = vec![
         ballot(&[0, 1]),
         ballot(&[0, 1]),
@@ -130,8 +144,9 @@ fn test_exactly_fifty_percent_not_majority() {
         ballot(&[1, 0]),
     ];
     let (winner, rounds) = run_irv(&ballots, 2);
-    assert_eq!(winner, Some(1));
-    assert_eq!(rounds[0].eliminated, Some(0));
+    assert_eq!(winner, None);
+    assert_eq!(rounds.len(), 1);
+    assert!(rounds[0].eliminated.is_none());
 }
 
 #[test]
@@ -177,14 +192,64 @@ fn test_fptp_plurality_without_majority() {
 }
 
 #[test]
-fn test_fptp_tie_break_lowest_id() {
-    // 2 candidates, 1-1 tie: FPTP crowns candidate 0 — the opposite of IRV, which would
-    // eliminate candidate 0. This test pins FPTP's distinct semantics.
+fn test_fptp_tie_yields_no_winner() {
+    // 2 candidates, 1-1 tie: a tied outcome has no winner — the count must not crown the
+    // lowest-id candidate.
     let ballots = vec![ballot(&[0, 1]), ballot(&[1, 0])];
     let (winner, counts) = run_fptp(&ballots, 2);
-    assert_eq!(winner, Some(0));
+    assert_eq!(winner, None);
     assert_eq!(counts.get(&0), Some(&1));
     assert_eq!(counts.get(&1), Some(&1));
+}
+
+#[test]
+fn test_fptp_three_way_tie_yields_no_winner() {
+    // 1-1-1: the maximum count is shared by all three candidates, so there is no winner.
+    let ballots = vec![ballot(&[0, 1, 2]), ballot(&[1, 2, 0]), ballot(&[2, 0, 1])];
+    let (winner, counts) = run_fptp(&ballots, 3);
+    assert_eq!(winner, None);
+    assert_eq!(counts.get(&0), Some(&1));
+    assert_eq!(counts.get(&1), Some(&1));
+    assert_eq!(counts.get(&2), Some(&1));
+}
+
+#[test]
+fn test_zero_turnout_and_tie_share_the_same_result() {
+    // Zero turnout is the degenerate tie (every count is 0); a 1-1 tie is the same shape.
+    // Both must produce no winner through the same unique-winner check.
+    let (zero_winner, zero_counts) = run_fptp(&[], 2);
+    let (tie_winner, tie_counts) = run_fptp(&[ballot(&[0, 1]), ballot(&[1, 0])], 2);
+    assert_eq!(zero_winner, None);
+    assert_eq!(tie_winner, None);
+    assert_eq!(zero_counts.values().max(), Some(&0));
+    assert_eq!(tie_counts.values().max(), Some(&1));
+}
+
+#[test]
+fn test_unique_plurality_winner_helper() {
+    use rcv_tally::unique_plurality_winner;
+    use std::collections::BTreeMap;
+
+    let mut unique = BTreeMap::new();
+    unique.insert(0u32, 2u64);
+    unique.insert(1, 1);
+    assert_eq!(unique_plurality_winner(&unique), Some(0));
+
+    let mut shared = BTreeMap::new();
+    shared.insert(0u32, 1u64);
+    shared.insert(1, 1);
+    assert_eq!(unique_plurality_winner(&shared), None);
+
+    let mut zero = BTreeMap::new();
+    zero.insert(0u32, 0u64);
+    zero.insert(1, 0);
+    assert_eq!(unique_plurality_winner(&zero), None);
+
+    let mut single = BTreeMap::new();
+    single.insert(0u32, 3u64);
+    assert_eq!(unique_plurality_winner(&single), Some(0));
+
+    assert_eq!(unique_plurality_winner(&BTreeMap::new()), None);
 }
 
 #[test]
@@ -222,7 +287,8 @@ fn test_fptp_yes_no_two_candidates() {
 
 #[test]
 fn test_fptp_no_ballots() {
-    // Zero turnout: nobody voted, so there is no winner (all-zero counts, panic-free).
+    // Zero turnout: nobody voted, so there is no winner — the degenerate tie where every
+    // count is 0, decided by the same unique-winner check as a shared-max tie.
     let (winner, counts) = run_fptp(&[], 3);
     assert_eq!(winner, None);
     assert_eq!(counts.get(&0), Some(&0));
@@ -382,10 +448,10 @@ mod stv_tests {
     #[test]
     fn test_stv_single_winner_matches_irv_behavior() {
         let ballots = vec![
-            ballot(&[0, 2, 1]),
-            ballot(&[0, 2, 1]),
-            ballot(&[1, 2, 0]),
-            ballot(&[2, 1, 0]),
+            ballot(&[0, 1, 2]),
+            ballot(&[0, 1, 2]),
+            ballot(&[1, 0, 2]),
+            ballot(&[2, 0, 1]),
         ];
         let (irv_winner, _) = run_irv(&ballots, 3);
         let (stv_winners, _) = run_stv(&ballots, 3, 1);
@@ -503,15 +569,32 @@ mod sequential_irv_tests {
     fn test_sequential_irv_single_winner_matches_irv() {
         // With 1 winner, sequential IRV should produce the same result as plain IRV.
         let ballots = vec![
-            ballot(&[0, 2, 1]),
-            ballot(&[0, 2, 1]),
-            ballot(&[1, 2, 0]),
-            ballot(&[2, 1, 0]),
+            ballot(&[0, 1, 2]),
+            ballot(&[0, 1, 2]),
+            ballot(&[1, 0, 2]),
+            ballot(&[2, 0, 1]),
         ];
         let (irv_winner, _) = run_irv(&ballots, 3);
         let (seq_winners, _) = run_sequential_irv(&ballots, 3, 1);
         assert_eq!(seq_winners.len(), 1);
         assert_eq!(Some(seq_winners[0]), irv_winner);
+    }
+
+    #[test]
+    fn test_sequential_irv_tied_seat_yields_no_winner_and_stops() {
+        // 2 candidates, 2 seats, 2-2 split: the first seat's election is a final-round tie,
+        // so that seat has no winner and no further seats are filled — the unfilled-seat
+        // (by-election) outcome.
+        let ballots = vec![
+            ballot(&[0, 1]),
+            ballot(&[0, 1]),
+            ballot(&[1, 0]),
+            ballot(&[1, 0]),
+        ];
+        let (winners, seats) = run_sequential_irv(&ballots, 2, 2);
+        assert_eq!(winners.len(), 0);
+        assert_eq!(seats.len(), 1);
+        assert_eq!(seats[0].winner, None);
     }
 
     #[test]

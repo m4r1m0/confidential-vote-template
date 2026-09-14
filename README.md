@@ -76,10 +76,10 @@ The single-winner tally uses **instant-runoff voting (IRV)**:
 
 1. Count each ballot's highest-ranked **still-active** candidate as a vote for that candidate.
 2. If any candidate has **strictly more than 50%** of the continuing ballots, they win.
-3. Otherwise, **eliminate** the candidate with the fewest votes. Ties are broken by **lowest candidate id** (deterministic, so all validators agree).
+3. Otherwise, **eliminate** the candidate with the fewest votes. Ties for elimination (multiple candidates tied for lowest) are broken by **lowest candidate id** (deterministic, so all validators agree) — the same procedural rule real IRV jurisdictions use.
 4. Repeat until a winner is found or only one candidate remains.
 
-If no ballots were cast, there is no winner: the tally returns `None` rather than electing anyone through elimination tie-breaks.
+**Ties.** A tie between the final two candidates is a tied outcome: the tally returns `None` (no winner), exactly like an election with no ballots cast — the degenerate tie where every count is 0. Ties and zero turnout are decided by the same unique-winner check. A tied election must be re-run.
 
 Each ballot is a permutation of `0..num_candidates`, where `ranking[0]` is the voter's first choice, `ranking[1]` their second, and so on. When a voter's top candidate is eliminated, their ballot redistributes to their next-highest-ranked still-active candidate.
 
@@ -91,8 +91,7 @@ For plain plurality elections, yes/no votes, and single-choice polls, pin `Tally
 
 1. Count each ballot's **first preference only** (`ranking[0]`) as a vote for that candidate. Later preferences never count.
 2. The candidate with the **most votes** wins — no majority is required (a plurality suffices, unlike IRV).
-3. Ties are broken by **lowest candidate id** (deterministic, so all validators agree).
-4. If no ballots were cast, there is no winner: the tally returns `None`.
+3. A tie for the most votes has **no winner**: the tally returns `None` (zero turnout is the degenerate tie — every count is 0 — and yields the same result, via the same unique-winner check).
 
 This covers three use cases with one method:
 
