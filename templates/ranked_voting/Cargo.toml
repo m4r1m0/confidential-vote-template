@@ -18,7 +18,13 @@ tari_template_lib = { version = "0.31" }
 rcv-tally = { path = "../../tally" }
 
 [dev-dependencies]
-tari_template_test_tooling = "0.39"
+tari_template_test_tooling = "0.40"
+# Pin wasmer to 7.3.0: `tari_engine` (upstream) declares `wasmer ^7.1.0`, but wasmer 7.4.0
+# removed an API the engine uses, which breaks `cargo test` on a fresh resolve. wasmer 7.3.0
+# pins its whole family internally (`=7.3.0`), so these two exact pins force the engine onto
+# the working version. Remove both once tari-ootle tightens its wasmer constraint.
+wasmer = "=7.3.0"
+wasmer-middlewares = "=7.3.0"
 
 [build-dependencies]
 tari_ootle_template_build = "0.11"

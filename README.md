@@ -1,4 +1,4 @@
-# Confidential Ranked-Choice Voting Template for Tari Ootle
+# Confidential Voting Template for Tari Ootle
 
 > ## ⚠️ Minify the WASM before you publish
 >
@@ -13,17 +13,15 @@
 > scale with WASM size, and every validator stores the template forever — an unminified
 > artifact costs roughly 15% more for the life of the chain.
 
-A confidential ranked-choice voting template for the Tari Ootle L2 platform. Voters cast unlinkable ranked ballots using stealth-addressed ballot tokens — no on-chain observer can link any ballot transaction to the voter who cast it. The instant-runoff (IRV) tally is computed on-chain and is trustlessly readable by anyone.
+A confidential voting template for the Tari Ootle L2 platform. Voters cast unlinkable ranked ballots using stealth-addressed ballot tokens — no on-chain observer can link any ballot transaction to the voter who cast it. The instant-runoff (IRV) tally is computed on-chain and is trustlessly readable by anyone. The same ballots also support **first-past-the-post (FPTP)** elections — covering plain plurality elections, yes/no votes (two candidates), and single-choice polls — chosen per election via `TallyMethod::Fptp`.
 
 ## Privacy model
 
-This template inherits the **coinjoin-style blending** design from the sibling yes/no [confidential voting template](https://github.com/m4r1m0/confidential-voting-template) (obscure *who sent what ballot*, not the ballot content):
-
 1. **Initiator mints stealth ballot tokens.** When a vote is initiated, the template mints one indivisible amount-1 ballot token per eligible voter and converts them into **stealth UTXOs** — each owned by a one-time key unlinkable to the voter's real public key. The stealth outputs are built off-chain by the initiator's wallet and passed to the template as a `StealthTransferStatement`. The supply is permanently capped at `voter_count` (see [Ballot supply cap](#ballot-supply-cap-no-extra-ballots)).
 
-2. **Voters spend privately.** Each voter spends their stealth ballot-token UTXO via `cast_ballot`, attaching their full ranking of the candidates. Because the spend is a **stealth transfer sealed with an ephemeral one-time key** (with the transaction fee paid from a separate stealth TARI UTXO), no on-chain observer can link the ballot transaction to a voter identity. The `cast_ballot` method deliberately never calls `CallerContext::transaction_signer_public_key()` so that ephemeral sealing works.
+2. **Voters spend privately.** Each voter spends their stealth ballot-token UTXO via `cast_ballot`, attaching their full ranking of the candidates. Voters discover their own ballot UTXO by scanning the ballot resource's unspent outputs — the initiator sends nothing back after initiation (see [Voter UTXO discovery](#voter-utxo-discovery)). Because the spend is a **stealth transfer sealed with an ephemeral one-time key** (with the transaction fee paid from a separate stealth TARI UTXO), no on-chain observer can link the ballot transaction to a voter identity. The `cast_ballot` method deliberately never calls `CallerContext::transaction_signer_public_key()` so that ephemeral sealing works.
 
-3. **Tally is public, on-chain, and trustless.** Anyone can call `result()` to compute the outcome from the stored ballots: instant-runoff for single-winner elections, or the multi-winner method chosen at initiation (see below). The computation is deterministic, so every validator and off-chain reader agrees on the outcome.
+3. **Tally is public, on-chain, and trustless.** Anyone can call `result()` to compute the outcome from the stored ballots: instant-runoff for single-winner elections, first past the post when pinned to `TallyMethod::Fptp`, or the multi-winner method chosen at initiation (see below). The computation is deterministic, so every validator and off-chain reader agrees on the outcome.
 
 ### What is private vs. public
 
@@ -31,7 +29,7 @@ This template inherits the **coinjoin-style blending** design from the sibling y
 |---|---|
 | Voter identity (who cast which ballot) | Ballot content (each voter's full ranking) |
 | | Number of ballots cast |
-| | The IRV winner and per-round tallies |
+| | The winner and per-round tallies |
 
 This is consistent with the [sibling template](https://github.com/m4r1m0/confidential-voting-template)'s model: voter *anonymity* is protected by stealth-address unlinkability; ballot *content* (the ranking) is visible on-chain. The ranking must be public for the on-chain IRV computation to be trustless.
 
@@ -66,29 +64,52 @@ The reference client in `client/integration` implements the canonical pattern in
 
 Fees paid from a bucket (`pay_fee_from_bucket`) are **non-refundable**: the engine takes the revealed fee bucket in full and burns any excess to the fee pool — there is no refund destination that could link a ballot back to a revealed account. The reference client therefore reveals a flat `VOTE_FEE` per ballot that comfortably exceeds the actual fee; the overpay is deliberately uniform so every ballot transaction reveals the same fee.
 
+### Voter UTXO discovery (scan, don't receive)
+
+Voters do not receive their ballot UTXO's `(commitment, sender nonce)` from the initiator. The indexer enumerates a resource's unspent stealth UTXOs publicly (`watch_stealth_utxos` → `fetch_unspent_utxos` in `ootle-rs`), each resolved output carrying its commitment and the sender's public nonce. Every output's encrypted data is DH-encrypted to the recipient's view-only key, so a voter finds exactly their own ballot by attempting to decrypt each candidate output — the MAC check succeeds only for the one addressed to them. No secret material is exchanged; the only out-of-band step in the whole flow is voters providing their addresses to the initiator before `new()` so the mint statement can be addressed.
+
+The reference client implements this in `find_my_ballot_utxo` (`client/integration/src/main.rs`). Like the fee-from-stealth requirement, it is a client-side contract: the template never sees UTXO commitments, and a wallet that was told its commitment instead of scanning produces a byte-identical ballot transaction.
+
 ## IRV tally algorithm (single-winner)
 
 The single-winner tally uses **instant-runoff voting (IRV)**:
 
 1. Count each ballot's highest-ranked **still-active** candidate as a vote for that candidate.
 2. If any candidate has **strictly more than 50%** of the continuing ballots, they win.
-3. Otherwise, **eliminate** the candidate with the fewest votes. Ties are broken by **lowest candidate id** (deterministic, so all validators agree).
+3. Otherwise, **eliminate** the candidate with the fewest votes. Ties for elimination (multiple candidates tied for lowest) are broken by **lowest candidate id** (deterministic, so all validators agree) — the same procedural rule real IRV jurisdictions use.
 4. Repeat until a winner is found or only one candidate remains.
 
-If no ballots were cast, there is no winner: the tally returns `None` rather than electing anyone through elimination tie-breaks.
+**Ties.** A tie between the final two candidates is a tied outcome: the tally returns `None` (no winner), exactly like an election with no ballots cast — the degenerate tie where every count is 0. Ties and zero turnout are decided by the same unique-winner check. A tied election must be re-run.
 
 Each ballot is a permutation of `0..num_candidates`, where `ranking[0]` is the voter's first choice, `ranking[1]` their second, and so on. When a voter's top candidate is eliminated, their ballot redistributes to their next-highest-ranked still-active candidate.
 
 The `result()` method is read-only (`&self`) and deterministic, so the outcome is trustless — no trusted tally authority is needed.
 
-## Choosing the multi-winner method
+## FPTP tally algorithm (single-winner; yes/no and polling)
 
-A single election either elects one winner (IRV) or several. For multi-winner elections, the tally method is **chosen once, when the vote is created**, by passing a `MultiWinnerMethod` to `new()`:
+For plain plurality elections, yes/no votes, and single-choice polls, pin `TallyMethod::Fptp` in `new()` (with `num_winners = 1` — FPTP is single-winner by definition, and `new` rejects any other seat count):
 
-- `MultiWinnerMethod::SequentialIrv` — the **default**: fill each seat by running single-winner IRV, removing the winner, and repeating. Simpler than STV (no quotas, no surplus transfer, no fractional weights) and reuses the single-winner logic directly. It is not proportional — a majority bloc could win all seats — but it is easy to audit and understand.
-- `MultiWinnerMethod::Stv` — **single transferable vote** with the Droop quota for proportional representation.
+1. Count each ballot's **first preference only** (`ranking[0]`) as a vote for that candidate. Later preferences never count.
+2. The candidate with the **most votes** wins — no majority is required (a plurality suffices, unlike IRV).
+3. A tie for the most votes has **no winner**: the tally returns `None` (zero turnout is the degenerate tie — every count is 0 — and yields the same result, via the same unique-winner check).
 
-The choice is stored in the component, so the outcome cannot be picked after the fact based on which method gives a favorable result. `num_winners = 1` always uses plain IRV regardless of the configured method.
+This covers three use cases with one method:
+
+- **First-past-the-post elections** — any number of candidates; the plurality leader wins.
+- **Yes/no voting** — exactly two candidates: candidate 0 = "yes", candidate 1 = "no". A ranking of `[0, 1]` is a yes vote, `[1, 0]` a no vote.
+- **Polling** — any number of options; the most popular option wins.
+
+Ballots are still full rankings (a permutation of `0..num_candidates`) — only the first preference matters, but every candidate must still be ranked. The privacy model is unchanged: the *choice* is public, the *voter* is hidden.
+
+## Choosing the tally method
+
+The tally method is **chosen once, when the vote is created**, by passing a `TallyMethod` to `new()`:
+
+- `TallyMethod::Fptp` — **first past the post**, single-winner only (`num_winners` must be 1). See the FPTP section above.
+- `TallyMethod::SequentialIrv` — the **default multi-winner** method: fill each seat by running single-winner IRV, removing the winner, and repeating. Simpler than STV (no quotas, no surplus transfer, no fractional weights) and reuses the single-winner logic directly. It is not proportional — a majority bloc could win all seats — but it is easy to audit and understand.
+- `TallyMethod::Stv` — **single transferable vote** with the Droop quota for proportional representation.
+
+The choice is stored in the component, so the outcome cannot be picked after the fact based on which method gives a favorable result. With `SequentialIrv`/`Stv`, `num_winners = 1` always uses plain IRV; `Fptp` always uses the first-preference tally.
 
 ## Sequential IRV tally algorithm (multi-winner, default)
 
@@ -121,13 +142,13 @@ After expiration, `end_vote_expired()` finalizes the tally with whatever ballots
 
 | Method | Access | Description |
 |---|---|---|
-| `new(alloc, voter_count, num_candidates, num_winners, multi_winner_method, expires_at_epoch, mint_statement)` | — | Constructor. Creates the stealth ballot resource, mints per-voter stealth ballot UTXOs, seals the mint badge (permanently capping the supply at `voter_count`), and starts the vote — all in one transaction. The caller of `new` is the **initiator**. |
+| `new(alloc, voter_count, num_candidates, num_winners, tally_method, expires_at_epoch, mint_statement)` | — | Constructor. Creates the stealth ballot resource, mints per-voter stealth ballot UTXOs, seals the mint badge (permanently capping the supply at `voter_count`), and starts the vote — all in one transaction. `tally_method` pins the tally (`TallyMethod::Fptp` requires `num_winners = 1`). The caller of `new` is the **initiator**. |
 | `resource_address()` | allow_all | Returns the ballot-token resource address. |
 | `voter_count()` | allow_all | Returns the number of eligible voters (the ballot supply, which can never grow). |
 | `cast_ballot(bucket, ranking)` | allow_all | Deposits one token + records a full ranking. Identity-free. Rejects after expiration. |
 | `ballot_count()` | allow_all | Returns the number of ballots cast so far. |
 | `ballot_vault_balance()` | allow_all | Returns the ballot pool vault balance (cross-check: equals `ballot_count`). |
-| `result()` | allow_all | Computes the tally: IRV when `num_winners = 1`, otherwise the `MultiWinnerMethod` chosen in `new`. Read-only. Returns a `VoteResult`. |
+| `result()` | allow_all | Computes the tally pinned in `new`: FPTP when `TallyMethod::Fptp`, IRV when `num_winners = 1`, otherwise the multi-winner `TallyMethod`. Read-only. Returns a `VoteResult`. |
 | `end_vote()` | initiator-only | Ends the vote, returns the final `VoteResult`, locks further ballots. |
 | `end_vote_expired()` | anyone (after the deadline) | Finalizes an expired election with the final `VoteResult` (even if not all ballots cast). |
 
@@ -137,11 +158,11 @@ The initiator is whoever called `new()` — no keys need to be edited before pub
 
 ```
 tally/                           Pure tally algorithms (standalone crate `rcv-tally`)
-  src/lib.rs                     IRV + STV + sequential IRV; no template ABI dependency
+  src/lib.rs                     FPTP + IRV + STV + sequential IRV; no template ABI dependency
 templates/ranked_voting/         The template (Rust → WASM, pure cdylib)
-  src/lib.rs                     Template; re-exports MultiWinnerMethod; wraps tally outputs into ABI result types
-  tests/test.rs                  Unit + adversarial + end-to-end in-process tests (45)
-client/integration/             3-voter end-to-end test on the Esmeralda testnet (IRV with redistribution; for primary testing see tests/test.rs, which covers the same scenario in-process)
+  src/lib.rs                     Template; re-exports TallyMethod; wraps tally outputs into ABI result types
+  tests/test.rs                  Unit + adversarial + end-to-end in-process tests (56)
+client/integration/             IRV and FPTP yes/no elections end-to-end on the Esmeralda testnet; for primary testing see tests/test.rs, which covers the same scenarios in-process
 ```
 
 ## Build
@@ -155,6 +176,11 @@ cargo test -p ranked_voting
 
 # Build the integration test client
 cargo build --bin integration
+
+> **wasmer pin:** `cargo test` needs `wasmer = "=7.3.0"` (pinned in
+> `templates/ranked_voting/Cargo.toml`): `tari_engine` declares `wasmer ^7.1.0`, but
+> wasmer 7.4.0 removed an API the engine uses. Remove the pins once tari-ootle
+> tightens its wasmer constraint.
 ```
 
 ### Publishing
@@ -173,8 +199,8 @@ scales with WASM size — unused fee is refunded (see `PUBLISH_FEE` in
 `client/integration/src/main.rs`) — and a smaller artifact also downloads and instantiates
 faster for voters.
 
-The WASM includes all tally methods: single-winner IRV plus both multi-winner methods
-(sequential IRV and STV). Deployers pick the method per election via the `MultiWinnerMethod`
+The WASM includes all tally methods: FPTP plus single-winner IRV and both multi-winner methods
+(sequential IRV and STV). Deployers pick the method per election via the `TallyMethod`
 argument of `new()`; nothing needs to be recompiled or republished to change it.
 
 ## Run the integration test
@@ -186,8 +212,13 @@ First minify the template as shown above — the client publishes the minified a
 cargo run --bin integration
 ```
 
-This runs a full 3-voter ranked-choice scenario on the Esmeralda testnet:
+This runs two elections on the Esmeralda testnet:
 
+**Election 1 — ranked-choice IRV** (3 voters, 3 candidates, 1 winner):
 - Initiator wallet faucets, publishes the template, creates the component with `new(3 candidates, 1 winner, sequential IRV, mint_statement)`, minting 3 stealth ballot UTXOs (one per voter).
-- Three voter wallets each faucet, convert TARI to a stealth UTXO for fees, then cast a private ballot via a two-input stealth spend (ballot UTXO → `cast_ballot`, TARI UTXO → fee) with their ranking.
+- Three voter wallets each faucet, discover their own ballot UTXO by scanning the ballot resource, convert TARI to a stealth UTXO for fees, then cast a private ballot via a two-input stealth spend (ballot UTXO → `cast_ballot`, TARI UTXO → fee) with their ranking.
 - `end_vote()` returns the IRV result: **candidate 2 wins in 2 rounds** (no first-round majority → candidate 0 eliminated → ballot redistributes to candidate 2 → majority).
+
+**Election 2 — FPTP yes/no** (3 voters, 2 candidates = "yes"/"no", 1 winner):
+- The same flow with `TallyMethod::Fptp`: voter choices are `[0, 1]` (yes), `[0, 1]` (yes), `[1, 0]` (no).
+- `end_vote()` returns the FPTP result: **candidate 0 ("yes") wins 2–1** — a plurality, no majority required.

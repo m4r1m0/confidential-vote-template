@@ -1,5 +1,6 @@
 //! Pure deterministic tally algorithms for ranked-choice elections: instant-runoff voting
-//! (IRV), single transferable vote (STV), and sequential IRV for multi-winner seats.
+//! (IRV), first past the post (FPTP), single transferable vote (STV), and sequential IRV for
+//! multi-winner seats.
 //!
 //! These live in a standalone crate so that (a) they can be unit-tested without linking the
 //! template itself — letting the template ship as a pure cdylib, which unlocks full LTO and
@@ -8,22 +9,49 @@
 //! `result()` methods wrap these outputs into ABI-compatible structs.
 
 use minicbor::{Decode, Encode};
+use std::collections::BTreeMap;
 
-/// The tally algorithm used for multi-winner elections (`num_winners > 1`). Chosen once at
-/// contract initialization and stored in the component, so the outcome cannot be picked after
-/// the fact based on which method gives a more favorable result.
+/// The tally algorithm used for an election. Chosen once at contract initialization and stored
+/// in the component, so the outcome cannot be picked after the fact based on which method gives
+/// a more favorable result.
+///
+/// `Fptp` is single-winner only; `SequentialIrv` and `Stv` are multi-winner methods
+/// (`num_winners > 1`). With `SequentialIrv` or `Stv` and `num_winners == 1`, the tally falls
+/// back to plain single-winner IRV.
 ///
 /// Defined here (rather than in the template) so tests can construct it without linking the
 /// template crate; the template re-exports it at its crate root, keeping the on-chain ABI
 /// unchanged — the dispatcher decodes arguments structurally via these CBOR derives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode, minicbor::CborLen)]
-pub enum MultiWinnerMethod {
+pub enum TallyMethod {
     /// Fill each seat by running single-winner IRV, removing the winner, and repeating.
     #[n(0)]
     SequentialIrv,
     /// Single transferable vote with the Droop quota (proportional representation).
     #[n(1)]
     Stv,
+    /// First past the post: single-winner only (`num_winners == 1`). Counts each ballot's first
+    /// preference; the candidate with the most votes wins (no majority required). With exactly
+    /// two candidates this is a plain yes/no vote, and with more it is a single-choice poll.
+    #[n(2)]
+    Fptp,
+}
+
+/// The candidate with a strictly unique, positive maximum count, or `None` when the maximum is
+/// shared (a tie) or zero (zero turnout — the degenerate tie where every count is 0). Both
+/// cases yield no winner, so ties and zero turnout are decided by the same function.
+pub fn unique_plurality_winner(counts: &BTreeMap<u32, u64>) -> Option<u32> {
+    let max = *counts.values().max()?;
+    if max == 0 {
+        return None;
+    }
+    let mut tied = counts.iter().filter(|&(_, &v)| v == max);
+    let winner = tied.next()?;
+    if tied.next().is_some() {
+        None
+    } else {
+        Some(*winner.0)
+    }
 }
 
 /// Pure instant-runoff tally logic, isolated from the template engine so it can be unit-tested
@@ -31,6 +59,7 @@ pub enum MultiWinnerMethod {
 /// it has no dependency on template ABI traits; the template's `result()` method wraps the output
 /// into the ABI-compatible `IrvResult` struct.
 pub mod irv {
+    use super::unique_plurality_winner;
     use std::collections::{BTreeMap, BTreeSet};
 
     /// Per-round data: first-preference counts among active candidates, and which candidate was
@@ -42,7 +71,10 @@ pub mod irv {
 
     /// Instant-runoff tally over a set of ballots. Each ballot is a permutation of
     /// `0..num_candidates` ordered by preference (index 0 = first choice). Deterministic: ties
-    /// for elimination are broken by lowest candidate id, so all validators agree on the outcome.
+    /// for elimination (multiple candidates tied for the lowest count) are broken by lowest
+    /// candidate id — the procedural rule used by real IRV jurisdictions — so all validators
+    /// agree on the outcome. A tie for the *winner* (the final two candidates tied) has no
+    /// winner, exactly like zero turnout: both return `None`, and the election must be re-run.
     ///
     /// Returns `(winner, rounds)` where `winner` is `Some(candidate_id)` or `None`, and `rounds`
     /// is the per-round tally trace. An election with no continuing ballots (e.g. zero turnout)
@@ -89,6 +121,18 @@ pub mod irv {
                     eliminated: None,
                 });
                 return (Some(w), rounds);
+            }
+
+            // Exactly two candidates remain: the majority check above already returned a winner
+            // unless the remaining two are tied, so this resolves a final-round tie with the
+            // same shared unique-winner check — no winner, exactly like zero turnout.
+            if active.len() == 2 {
+                let winner = unique_plurality_winner(&counts);
+                rounds.push(Round {
+                    counts,
+                    eliminated: None,
+                });
+                return (winner, rounds);
             }
 
             // Eliminate the lowest-count candidate; ties broken by lowest id (BTreeSet order).
@@ -416,5 +460,43 @@ pub mod sequential_irv {
         }
 
         (winners, seats)
+    }
+}
+
+/// Pure first-past-the-post tally logic, isolated from the template engine so it can be
+/// unit-tested directly without stealth-transfer machinery. Returns simple types (winner +
+/// first-preference counts) with no dependency on template ABI traits; the template's
+/// `result()` method wraps the output into the ABI-compatible `FptpResult` struct.
+pub mod fptp {
+    use super::unique_plurality_winner;
+    use std::collections::BTreeMap;
+
+    /// First-past-the-post tally over a set of ranked ballots. Each ballot is a permutation of
+    /// `0..num_candidates` ordered by preference; only the first preference (`ranking[0]`)
+    /// counts as a vote.
+    ///
+    /// The candidate with the most first-preference votes wins — no majority is required. A tie
+    /// for the most votes has no winner: returns `None` (zero turnout is the degenerate tie —
+    /// every count is 0 — and yields the same result). Ties and zero turnout are decided by the
+    /// same `unique_plurality_winner` check; the winner must hold a strictly unique count.
+    ///
+    /// Returns `(winner, counts)` where `winner` is `Some(candidate_id)` or `None`, and `counts`
+    /// maps every candidate to its first-preference count.
+    pub fn run_fptp(
+        ballots: &[Vec<u32>],
+        num_candidates: u32,
+    ) -> (Option<u32>, BTreeMap<u32, u64>) {
+        let mut counts: BTreeMap<u32, u64> = (0..num_candidates).map(|c| (c, 0u64)).collect();
+        for ballot in ballots {
+            if let Some(&first) = ballot.first().filter(|first| counts.contains_key(first)) {
+                *counts.get_mut(&first).expect("first preference counted") += 1;
+            }
+        }
+
+        // Ties and zero turnout share one decision: the winner must be a strictly unique,
+        // positive maximum. Zero turnout (all counts 0) is the degenerate tie and returns
+        // `None` through this same check.
+        let winner = unique_plurality_winner(&counts);
+        (winner, counts)
     }
 }

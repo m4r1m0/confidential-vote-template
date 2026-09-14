@@ -2,10 +2,10 @@
 name = "rcv-tally"
 version = "0.1.0"
 edition = "2024"
-description = "Pure deterministic tally algorithms (IRV, STV, sequential IRV) for the confidential ranked-choice voting template"
+description = "Pure deterministic tally algorithms (FPTP, IRV, STV, sequential IRV) for the confidential ranked-choice voting template"
 
 [dependencies]
-# Same minicbor as `tari_template_lib` re-exports, so `MultiWinnerMethod`'s CBOR derives are
+# Same minicbor as `tari_template_lib` re-exports, so `TallyMethod`'s CBOR derives are
 # coherent between this crate and the template that re-exports it.
 minicbor = { version = "2.2", default-features = false, features = ["alloc", "derive"] }
 

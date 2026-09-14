@@ -1,13 +1,16 @@
 use tari_template_lib::prelude::*;
 
-/// The tally algorithm used for multi-winner elections (`num_winners > 1`). Chosen once at
-/// contract initialization and stored in the component, so the outcome cannot be picked after
-/// the fact based on which method gives a more favorable result.
+/// The tally algorithm used for an election. Chosen once at contract initialization and stored
+/// in the component, so the outcome cannot be picked after the fact based on which method gives
+/// a more favorable result.
+///
+/// `Fptp` is single-winner only; `SequentialIrv` and `Stv` are multi-winner methods
+/// (`num_winners > 1`) — with `num_winners == 1` they fall back to plain IRV.
 ///
 /// Defined in the standalone `rcv-tally` crate (see its docs) and re-exported here so the
 /// template macro's dispatcher — which decodes function arguments at crate scope — can resolve
 /// it without linking an rlib of this crate.
-pub use rcv_tally::MultiWinnerMethod;
+pub use rcv_tally::TallyMethod;
 
 /// A vote instance mints one unlinkable stealth ballot-token UTXO per eligible voter (built
 /// off-chain by the initiator's wallet and passed in as a `StealthTransferStatement`). Each voter
@@ -19,10 +22,15 @@ pub use rcv_tally::MultiWinnerMethod;
 /// *who*, not *what*).
 ///
 /// The tally is instant-runoff: count each ballot's highest-ranked still-active candidate; if one
-/// exceeds 50% they win; otherwise eliminate the lowest-count candidate (ties broken by lowest
-/// candidate id for determinism) and repeat. `result()` is a deterministic computation over the
-/// stored ballots, so the outcome is trustless — any validator or off-chain reader computes the
-/// same winner.
+/// exceeds 50% they win; otherwise eliminate the lowest-count candidate (elimination ties
+/// broken by lowest candidate id for determinism) and repeat. A tie between the final two
+/// candidates — like zero turnout, the degenerate tie — yields no winner (`None`), so a tied
+/// election must be re-run. Elections pinned to `TallyMethod::Fptp` instead
+/// count first preferences only (single-winner plurality — see the `new` docs), which covers
+/// plain FPTP elections, yes/no votes (two candidates), and single-choice polls; an FPTP tie
+/// for the most votes likewise yields no winner. `result()` is
+/// a deterministic computation over the stored ballots, so the outcome is trustless — any
+/// validator or off-chain reader computes the same winner.
 ///
 /// Double-voting is impossible: the mint statement's per-output minimum-value promises (asserted
 /// in `new` and bound by the engine's range proof) pin every ballot to exactly one token at
@@ -36,6 +44,7 @@ pub use rcv_tally::MultiWinnerMethod;
 #[template]
 pub mod ranked_voting {
     use super::*;
+    use rcv_tally::fptp::run_fptp;
     use rcv_tally::irv::run_irv;
     use rcv_tally::sequential_irv::run_sequential_irv;
     use rcv_tally::stv::run_stv;
@@ -55,12 +64,12 @@ pub mod ranked_voting {
         ballot_vault: Vault,
         ballots: Vec<Vec<u32>>,
         num_candidates: u32,
-        /// Number of winners to elect. 1 = single-winner IRV; >1 = multi-winner via the method
-        /// chosen in `new` (`MultiWinnerMethod`).
+        /// Number of winners to elect. 1 = single-winner IRV (or FPTP when `TallyMethod::Fptp`);
+        /// >1 = multi-winner via the method chosen in `new` (`TallyMethod`).
         num_winners: u32,
-        /// The tally algorithm used for multi-winner elections (`num_winners > 1`). Pinned once
-        /// at construction; the outcome cannot later be picked from whichever method is favorable.
-        multi_winner_method: MultiWinnerMethod,
+        /// The tally algorithm used for the election, pinned once at construction; the outcome
+        /// cannot later be picked from whichever method is favorable.
+        tally_method: TallyMethod,
         /// The number of eligible voters: the ballot supply minted at construction. The supply
         /// can never grow after construction (see `mint_badge_vault`).
         voter_count: u64,
@@ -72,13 +81,15 @@ pub mod ranked_voting {
 
     /// The result of a tally, returned by `result()` / `end_vote()` / `end_vote_expired()`.
     ///
-    /// The variant is fixed by the election's configuration: `num_winners == 1` always yields
-    /// `Irv`, and multi-winner elections yield whichever variant the `MultiWinnerMethod` chosen
-    /// at initialization produces.
+    /// The variant is fixed by the election's configuration: `TallyMethod::Fptp` always yields
+    /// `Fptp`; `num_winners == 1` yields `Irv`; and multi-winner elections yield whichever
+    /// variant the `TallyMethod` chosen at initialization produces.
     #[derive(Clone, Debug)]
     pub enum VoteResult {
         /// Single-winner instant-runoff result.
         Irv(IrvResult),
+        /// First-past-the-post single-winner result.
+        Fptp(FptpResult),
         /// Sequential-IRV multi-winner result.
         SequentialIrv(SequentialIrvResult),
         /// STV multi-winner result.
@@ -111,6 +122,18 @@ pub mod ranked_voting {
         pub winners: Vec<u32>,
         /// Per-round tally trace.
         pub rounds: Vec<StvRoundTally>,
+    }
+
+    /// Result of a first-past-the-post tally. With exactly two candidates this is a plain
+    /// yes/no vote; with more it is a single-choice poll.
+    #[derive(Clone, Debug)]
+    pub struct FptpResult {
+        /// The winning candidate id (most first-preference votes), or `None` if no ballots
+        /// were cast or the most-vote count is shared (a tie — including zero turnout,
+        /// the degenerate tie where every count is 0).
+        pub winner: Option<u32>,
+        /// First-preference counts per candidate.
+        pub counts: BTreeMap<u32, u64>,
     }
 
     /// One round of the STV tally.
@@ -158,11 +181,13 @@ pub mod ranked_voting {
         ///   voter.
         /// - `num_candidates`: Number of candidates. Each ballot must be a permutation of
         ///   `0..num_candidates`.
-        /// - `num_winners`: Number of seats to fill. 1 = single-winner IRV; >1 = multi-winner
-        ///   via `multi_winner_method`.
-        /// - `multi_winner_method`: The tally algorithm for multi-winner elections
-        ///   (`num_winners > 1`). Pinned here and stored in the component, so the outcome cannot
-        ///   be picked after the fact based on whichever method gives a favorable result.
+        /// - `num_winners`: Number of seats to fill. 1 = single-winner IRV (or FPTP when
+        ///   `TallyMethod::Fptp`); >1 = multi-winner via `tally_method`.
+        /// - `tally_method`: The tally algorithm for the election, pinned here and stored in the
+        ///   component, so the outcome cannot be picked after the fact based on whichever method
+        ///   gives a favorable result. `Fptp` is single-winner only (`num_winners` must be 1);
+        ///   `SequentialIrv`/`Stv` apply when `num_winners > 1` and fall back to plain IRV for
+        ///   single-winner elections.
         /// - `expires_at_epoch`: Deadline after which no more ballots may be cast. Prevents
         ///   elections from being held up indefinitely by voters who never spend their stealth
         ///   ballot tokens. After expiration, `end_vote_expired()` finalizes the tally with
@@ -187,7 +212,7 @@ pub mod ranked_voting {
             voter_count: u64,
             num_candidates: u32,
             num_winners: u32,
-            multi_winner_method: MultiWinnerMethod,
+            tally_method: TallyMethod,
             expires_at_epoch: u64,
             mint_statement: StealthTransferStatement,
         ) -> Component<Self> {
@@ -197,6 +222,12 @@ pub mod ranked_voting {
             assert!(
                 num_winners <= num_candidates,
                 "num_winners cannot exceed num_candidates",
+            );
+            // FPTP is single-winner by definition: it counts first preferences only, so multiple
+            // seats would be indistinguishable from sequential plurality rather than a tally.
+            assert!(
+                !matches!(tally_method, TallyMethod::Fptp) || num_winners == 1,
+                "TallyMethod::Fptp is single-winner only (num_winners must be 1)",
             );
             assert_eq!(
                 mint_statement.revealed_input_amount(),
@@ -279,7 +310,7 @@ pub mod ranked_voting {
                 ballots: Vec::new(),
                 num_candidates,
                 num_winners,
-                multi_winner_method,
+                tally_method,
                 voter_count,
                 expires_at_epoch,
                 active: true,
@@ -367,14 +398,18 @@ pub mod ranked_voting {
             self.ballot_vault.balance()
         }
 
-        /// Compute the tally for the configured election: single-winner IRV when
-        /// `num_winners == 1`, otherwise the multi-winner method pinned in `new`
-        /// (`MultiWinnerMethod`). Read-only and deterministic.
+        /// Compute the tally for the configured election: FPTP when `TallyMethod::Fptp` was pinned in
+        /// `new`, single-winner IRV when `num_winners == 1`, otherwise the multi-winner method
+        /// pinned in `new` (`TallyMethod`). Read-only and deterministic.
         pub fn result(&self) -> VoteResult {
-            if self.num_winners == 1 {
-                VoteResult::Irv(self.irv_result())
-            } else {
-                self.multi_winner_result()
+            match self.tally_method {
+                TallyMethod::Fptp => VoteResult::Fptp(self.fptp_result()),
+                TallyMethod::SequentialIrv if self.num_winners > 1 => {
+                    VoteResult::SequentialIrv(self.sequential_irv_result())
+                }
+                TallyMethod::Stv if self.num_winners > 1 => VoteResult::Stv(self.stv_result()),
+                // SequentialIrv / Stv with a single winner fall back to plain IRV.
+                TallyMethod::SequentialIrv | TallyMethod::Stv => VoteResult::Irv(self.irv_result()),
             }
         }
 
@@ -402,14 +437,24 @@ pub mod ranked_voting {
             result
         }
 
-        /// Multi-winner tally via the method pinned in `new`.
-        fn multi_winner_result(&self) -> VoteResult {
-            match self.multi_winner_method {
-                MultiWinnerMethod::SequentialIrv => {
-                    VoteResult::SequentialIrv(self.sequential_irv_result())
-                }
-                MultiWinnerMethod::Stv => VoteResult::Stv(self.stv_result()),
-            }
+        /// First-past-the-post single-winner tally: counts each ballot's first preference; the
+        /// candidate with the most votes wins (no majority required). A tie for the most votes
+        /// has no winner, exactly like zero turnout (the degenerate tie). With exactly two
+        /// candidates this is a plain yes/no vote. Emits a `ResultFptp` event.
+        fn fptp_result(&self) -> FptpResult {
+            let (winner, counts) = run_fptp(&self.ballots, self.num_candidates);
+            let result = FptpResult { winner, counts };
+            emit_event(
+                "ResultFptp",
+                metadata![
+                    "winner" => match result.winner {
+                        Some(w) => w.to_string(),
+                        None => "none".to_string(),
+                    },
+                    "counts" => format!("{:?}", result.counts),
+                ],
+            );
+            result
         }
 
         /// Sequential-IRV multi-winner tally. Emits a `ResultMulti` event.
@@ -465,8 +510,8 @@ pub mod ranked_voting {
         }
 
         /// End the vote (initiator-only). Locks the vote against further ballots and returns the
-        /// tally for the configured election: single-winner IRV when `num_winners == 1`,
-        /// otherwise the multi-winner method pinned in `new`.
+        /// tally for the configured election: FPTP when `TallyMethod::Fptp`, single-winner IRV
+        /// when `num_winners == 1`, otherwise the multi-winner method pinned in `new`.
         pub fn end_vote(&mut self) -> VoteResult {
             assert!(self.active, "No active vote");
             self.active = false;
