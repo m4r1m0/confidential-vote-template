@@ -2,8 +2,10 @@
 # Used by `tari publish` to publish the template and register its build-time
 # metadata with the community-templates metadata server so it appears on
 # https://ootle.tari.com/community-templates.
-# Run from this directory: `tari publish -c tari.config.toml` (or copy to
-# ~/.config/tari_cli/tari.config.toml and run `tari publish` from the workspace root).
+# Run `tari publish` from this directory (the CLI discovers this file by walking up
+# from the current directory; add -y to skip the confirmation prompts). It builds the
+# WASM, registers the metadata hash on-chain, and offers to post the metadata to the
+# server. Note: `-c` is the --custom-network flag, not a config path.
 default-network = "esmeralda"
 
 [networks.localnet]
