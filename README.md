@@ -13,11 +13,9 @@
 > scale with WASM size, and every validator stores the template forever — an unminified
 > artifact costs roughly 15% more for the life of the chain.
 
-A confidential ranked-choice voting template for the Tari Ootle L2 platform. Voters cast unlinkable ranked ballots using stealth-addressed ballot tokens — no on-chain observer can link any ballot transaction to the voter who cast it. The instant-runoff (IRV) tally is computed on-chain and is trustlessly readable by anyone. The same ballots also support **first-past-the-post (FPTP)** elections — covering plain plurality elections, yes/no votes (two candidates), and single-choice polls — chosen per election via `TallyMethod::Fptp`.
+A confidential voting template for the Tari Ootle L2 platform. Voters cast unlinkable ranked ballots using stealth-addressed ballot tokens — no on-chain observer can link any ballot transaction to the voter who cast it. The instant-runoff (IRV) tally is computed on-chain and is trustlessly readable by anyone. The same ballots also support **first-past-the-post (FPTP)** elections — covering plain plurality elections, yes/no votes (two candidates), and single-choice polls — chosen per election via `TallyMethod::Fptp`.
 
 ## Privacy model
-
-This template inherits the **coinjoin-style blending** design from the sibling yes/no [confidential voting template](https://github.com/m4r1m0/confidential-voting-template) (obscure *who sent what ballot*, not the ballot content):
 
 1. **Initiator mints stealth ballot tokens.** When a vote is initiated, the template mints one indivisible amount-1 ballot token per eligible voter and converts them into **stealth UTXOs** — each owned by a one-time key unlinkable to the voter's real public key. The stealth outputs are built off-chain by the initiator's wallet and passed to the template as a `StealthTransferStatement`. The supply is permanently capped at `voter_count` (see [Ballot supply cap](#ballot-supply-cap-no-extra-ballots)).
 
