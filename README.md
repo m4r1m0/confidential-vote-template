@@ -1,4 +1,4 @@
-# Confidential Ranked-Choice Voting Template for Tari Ootle
+# Confidential Voting Template for Tari Ootle
 
 > ## ⚠️ Minify the WASM before you publish
 >
