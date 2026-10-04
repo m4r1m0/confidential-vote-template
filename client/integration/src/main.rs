@@ -13,7 +13,6 @@ use ootle_rs::{
         UnsignedTransactionBuilder,
         account::IAccount,
         component::{IComponent, TransactionBuildable},
-        faucet::IFaucet,
     },
     crypto::{StealthCryptoApi, encrypted_data},
     default_indexer_url,
@@ -46,6 +45,12 @@ const NUM_CANDIDATES: u32 = 3;
 const NUM_WINNERS: u32 = 1;
 const EXPIRES_AT_EPOCH: u64 = 100_000;
 const CONVERT_AMOUNT: u64 = TARI;
+/// Amount (micro-tTARI) transferred to each wallet from the funding (`deploy`) account on
+/// the wallet daemon — replaces the public faucet, which is empty on the testnet. The
+/// initiator needs enough to cover the publish fee (charged up front, unused refunded);
+/// voters need the convert amount plus ballot fees.
+const INITIATOR_FUNDING: u64 = 50_000_000;
+const VOTER_FUNDING: u64 = 5_000_000;
 /// Fee paid per ballot from the stealth TARI UTXO. Bucket-paid fees are taken in full with
 /// no refund — the excess is burned to the fee pool (`pay_fee_from_bucket` has no refunds),
 /// so this is a flat overpay above the actual fee. The uniform amount is intentional: every
@@ -98,18 +103,60 @@ async fn max_epoch(provider: &Provider) -> Result<Epoch> {
     Ok(Epoch(provider.get_epoch().await?.as_u64() + 10))
 }
 
-async fn faucet(provider: &mut Provider, label: &str) -> Result<()> {
-    print!("\n[{label}] Faucet... ");
-    let unsigned = IFaucet::new(provider, max_epoch(provider).await?)
-        .take_faucet_funds()
-        .pay_fee(5_000u64)
-        .prepare()
-        .await?;
-    let tx = TransactionRequest::default()
-        .with_transaction(unsigned)
-        .build(provider.wallet())
-        .await?;
-    wait_for_commit(&provider.send_transaction(tx).await?, "faucet").await
+/// Funds a wallet by transferring tTARI from the `deploy` account on the wallet daemon.
+/// The public testnet faucet is empty, so the canonical funding path is a plain account
+/// transfer: the daemon submits `accounts.transfer` from the funding account to the
+/// wallet's account public key, and the destination account is created on first receive.
+///
+/// Requires two environment variables:
+///   OOTLE_FUNDING_RPC_URL   wallet-daemon JSON-RPC URL (default: the local tunnel)
+///   OOTLE_FUNDING_TOKEN     an Admin bearer token for the wallet daemon
+async fn fund_from_deploy(address: &Address, amount: u64, label: &str) -> Result<()> {
+    let url = std::env::var("OOTLE_FUNDING_RPC_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:5100/json_rpc".to_string());
+    let token = std::env::var("OOTLE_FUNDING_TOKEN")
+        .context("OOTLE_FUNDING_TOKEN must be set (an Admin wallet-daemon token)")?;
+    let destination_public_key = hex::encode(address.account_public_key().as_bytes());
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "accounts.transfer",
+        "params": {
+            "account": { "Name": "deploy" },
+            "amount": amount,
+            "resource_address": TARI_TOKEN,
+            "destination_public_key": destination_public_key,
+            "max_fee": 50_000,
+            "dry_run": false,
+        },
+    });
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await
+        .with_context(|| format!("funding RPC call to {url}"))?;
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .context("reading funding RPC response")?;
+    if let Some(error) = body.get("error") {
+        anyhow::bail!("funding RPC error: {error}");
+    }
+    // The transfer RPC blocks until finalization and returns the result; the destination
+    // account is created on first receive, so the wallet sees the funds after this call.
+    let result = body
+        .get("result")
+        .context("funding RPC returned no result")?;
+    let status = result
+        .pointer("/result/result")
+        .and_then(|r| r.as_str())
+        .unwrap_or("unknown");
+    println!("\n[{label}] funded via deploy account transfer ({status})");
+    Ok(())
 }
 
 /// Publish fee for the publish step. Unused fee is refunded, so overpaying costs nothing; the
@@ -573,7 +620,7 @@ async fn run_election(
             hex::encode(ballot_commitment)
         );
 
-        faucet(&mut voter_provider, &format!("Voter {i}")).await?;
+        fund_from_deploy(&voter_address, VOTER_FUNDING, &format!("Voter {i}")).await?;
         let (tari_commitment, tari_nonce) =
             convert_to_stealth_tari(&mut voter_provider, &voter_address).await?;
         cast_private_ballot(
@@ -609,7 +656,7 @@ async fn main() -> Result<()> {
         .await?;
     println!("Connected to indexer");
 
-    faucet(&mut initiator_provider, "Initiator").await?;
+    fund_from_deploy(&init_address, INITIATOR_FUNDING, "Initiator").await?;
     let template_address = publish_template(&mut initiator_provider).await?;
 
     // Election 1: single-winner ranked-choice IRV (3 voters, 3 candidates, 1 winner).
