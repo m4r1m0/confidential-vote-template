@@ -1,7 +1,7 @@
 //! CI-only end-to-end integration test for the ranked-voting template.
 //!
 //! Runs a full 3-voter ranked-choice scenario on the Esmeralda testnet. For primary testing,
-//! see `templates/ranked_voting/tests/test.rs` (in-process, no testnet needed).
+//! see `templates/confidential_voting/tests/test.rs` (in-process, no testnet needed).
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
@@ -38,9 +38,9 @@ use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
 use tari_ootle_transaction::{Epoch, args};
 
 // Publish the minified release build — minify it first with:
-//   wasm-opt -Oz --enable-bulk-memory target/wasm32-unknown-unknown/release/ranked_voting.wasm \
-//       -o target/wasm32-unknown-unknown/release/ranked_voting.min.wasm
-const WASM_PATH: &str = "target/wasm32-unknown-unknown/release/ranked_voting.min.wasm";
+//   wasm-opt -Oz --enable-bulk-memory target/wasm32-unknown-unknown/release/confidential_voting.wasm \
+//       -o target/wasm32-unknown-unknown/release/confidential_voting.min.wasm
+const WASM_PATH: &str = "target/wasm32-unknown-unknown/release/confidential_voting.min.wasm";
 const VOTER_COUNT: usize = 3;
 const NUM_CANDIDATES: u32 = 3;
 const NUM_WINNERS: u32 = 1;
@@ -66,16 +66,15 @@ const EXPECTED_WINNER: u32 = 2;
 
 // ───────────────────────── FPTP yes/no scenario ─────────────────────────
 // A first-past-the-post election with exactly two candidates is functionally a yes/no vote:
-// candidate 0 = "yes", candidate 1 = "no". The tally counts first preferences only — the
-// candidate with the most votes wins, with no majority required.
+// candidate 0 = "yes", candidate 1 = "no". Each ballot is a single choice — the candidate
+// with the most choices wins, with no majority required.
 
 const FPTP_VOTER_COUNT: usize = 3;
 const FPTP_NUM_CANDIDATES: u32 = 2;
 const FPTP_NUM_WINNERS: u32 = 1;
-/// Each voter's choice as a full ranking of the two candidates: [0, 1] = "yes", [1, 0] = "no".
+/// Each voter's choice as a one-element ballot: [0] = "yes", [1] = "no".
 /// Two "yes" votes vs one "no" → candidate 0 ("yes") wins 2-1.
-const FPTP_VOTER_CHOICES: [[u32; FPTP_NUM_CANDIDATES as usize]; FPTP_VOTER_COUNT] =
-    [[0, 1], [0, 1], [1, 0]];
+const FPTP_VOTER_CHOICES: [[u32; 1]; FPTP_VOTER_COUNT] = [[0], [0], [1]];
 const FPTP_EXPECTED_WINNER: u32 = 0;
 
 type Provider = IndexerProvider<OotleWallet>;
@@ -613,7 +612,7 @@ async fn main() -> Result<()> {
     faucet(&mut initiator_provider, "Initiator").await?;
     let template_address = publish_template(&mut initiator_provider).await?;
 
-    // Election 1: ranked-choice IRV (3 voters, 3 candidates, 1 winner).
+    // Election 1: single-winner ranked-choice IRV (3 voters, 3 candidates, 1 winner).
     println!("\n=== Election 1: ranked-choice IRV ===");
     let irv_winner = run_election(
         &mut initiator_provider,
@@ -621,7 +620,7 @@ async fn main() -> Result<()> {
         VOTER_COUNT,
         NUM_CANDIDATES,
         NUM_WINNERS,
-        TallyMethod::SequentialIrv,
+        TallyMethod::Irv,
         &VOTER_RANKINGS
             .iter()
             .map(|r| r.to_vec())

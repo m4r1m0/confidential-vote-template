@@ -1,14 +1,14 @@
 [package]
-name = "ranked_voting"
+name = "confidential_voting"
 version = "0.1.0"
 edition = "2024"
-description = "Confidential ranked-choice voting template for Tari Ootle (IRV, stealth ballots, unlinkable voters)"
+description = "Confidential voting template for Tari Ootle (IRV, FPTP, STV, stealth ballots, unlinkable voters)"
 
 [package.metadata.tari-template]
-tags = ["voting", "governance", "dao", "rcv", "stv", "election", "confidential", "stealth"]
+tags = ["voting", "governance", "dao", "rcv", "fptp", "stv", "election", "confidential", "stealth"]
 category = "governance"
-documentation = "https://github.com/m4r1m0/confidential-rcv-template"
-homepage = "https://github.com/m4r1m0/confidential-rcv-template"
+documentation = "https://github.com/m4r1m0/confidential-vote-template"
+homepage = "https://github.com/m4r1m0/confidential-vote-template"
 
 [dependencies]
 tari_template_lib = { version = "0.31" }

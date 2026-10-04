@@ -169,8 +169,9 @@ fn test_determinism_same_result() {
 }
 
 // ───────────────────────── FPTP unit tests ─────────────────────────
-// First past the post counts each ballot's first preference only; the most votes win with no
-// majority required.
+// First past the post counts each ballot's single choice only; the most choices win with no
+// majority required. Ballots are one-element `[choice]` lists — the template rejects every
+// other shape for FPTP elections.
 
 use rcv_tally::fptp::run_fptp;
 
@@ -178,12 +179,7 @@ use rcv_tally::fptp::run_fptp;
 fn test_fptp_plurality_without_majority() {
     // 4 votes, 3 candidates: 2/1/1. No candidate has >50%, but FPTP crowns the plurality
     // leader (IRV would eliminate the lowest and keep going).
-    let ballots = vec![
-        ballot(&[0, 1, 2]),
-        ballot(&[0, 1, 2]),
-        ballot(&[1, 2, 0]),
-        ballot(&[2, 1, 0]),
-    ];
+    let ballots = vec![ballot(&[0]), ballot(&[0]), ballot(&[1]), ballot(&[2])];
     let (winner, counts) = run_fptp(&ballots, 3);
     assert_eq!(winner, Some(0));
     assert_eq!(counts.get(&0), Some(&2));
@@ -195,7 +191,7 @@ fn test_fptp_plurality_without_majority() {
 fn test_fptp_tie_yields_no_winner() {
     // 2 candidates, 1-1 tie: a tied outcome has no winner — the count must not crown the
     // lowest-id candidate.
-    let ballots = vec![ballot(&[0, 1]), ballot(&[1, 0])];
+    let ballots = vec![ballot(&[0]), ballot(&[1])];
     let (winner, counts) = run_fptp(&ballots, 2);
     assert_eq!(winner, None);
     assert_eq!(counts.get(&0), Some(&1));
@@ -205,7 +201,7 @@ fn test_fptp_tie_yields_no_winner() {
 #[test]
 fn test_fptp_three_way_tie_yields_no_winner() {
     // 1-1-1: the maximum count is shared by all three candidates, so there is no winner.
-    let ballots = vec![ballot(&[0, 1, 2]), ballot(&[1, 2, 0]), ballot(&[2, 0, 1])];
+    let ballots = vec![ballot(&[0]), ballot(&[1]), ballot(&[2])];
     let (winner, counts) = run_fptp(&ballots, 3);
     assert_eq!(winner, None);
     assert_eq!(counts.get(&0), Some(&1));
@@ -218,7 +214,7 @@ fn test_zero_turnout_and_tie_share_the_same_result() {
     // Zero turnout is the degenerate tie (every count is 0); a 1-1 tie is the same shape.
     // Both must produce no winner through the same unique-winner check.
     let (zero_winner, zero_counts) = run_fptp(&[], 2);
-    let (tie_winner, tie_counts) = run_fptp(&[ballot(&[0, 1]), ballot(&[1, 0])], 2);
+    let (tie_winner, tie_counts) = run_fptp(&[ballot(&[0]), ballot(&[1])], 2);
     assert_eq!(zero_winner, None);
     assert_eq!(tie_winner, None);
     assert_eq!(zero_counts.values().max(), Some(&0));
@@ -253,15 +249,10 @@ fn test_unique_plurality_winner_helper() {
 }
 
 #[test]
-fn test_fptp_first_preference_only() {
-    // A ballot's second and third preferences never count. Ballot [0, 1, 2] votes for 0 only,
-    // regardless of how the rest of the field performs.
-    let ballots = vec![
-        ballot(&[0, 1, 2]),
-        ballot(&[1, 0, 2]),
-        ballot(&[1, 2, 0]),
-        ballot(&[2, 1, 0]),
-    ];
+fn test_fptp_counts_only_the_choice() {
+    // Each ballot carries exactly the chosen candidate; nothing beyond the choice exists or
+    // counts. The template rejects any ballot that is not a validated single choice.
+    let ballots = vec![ballot(&[0]), ballot(&[1]), ballot(&[1]), ballot(&[2])];
     let (winner, counts) = run_fptp(&ballots, 3);
     assert_eq!(winner, Some(1));
     assert_eq!(counts.get(&0), Some(&1));
@@ -271,13 +262,14 @@ fn test_fptp_first_preference_only() {
 
 #[test]
 fn test_fptp_yes_no_two_candidates() {
-    // Two candidates = plain yes/no vote. Candidate 0 ("yes") wins 3-2.
+    // Two candidates = plain yes/no vote: [0] is a "yes" ballot, [1] a "no". Candidate 0
+    // ("yes") wins 3-2.
     let ballots = vec![
-        ballot(&[0, 1]),
-        ballot(&[0, 1]),
-        ballot(&[0, 1]),
-        ballot(&[1, 0]),
-        ballot(&[1, 0]),
+        ballot(&[0]),
+        ballot(&[0]),
+        ballot(&[0]),
+        ballot(&[1]),
+        ballot(&[1]),
     ];
     let (winner, counts) = run_fptp(&ballots, 2);
     assert_eq!(winner, Some(0));
@@ -307,7 +299,7 @@ fn test_fptp_single_candidate() {
 
 #[test]
 fn test_fptp_single_voter() {
-    let ballots = vec![ballot(&[2, 0, 1])];
+    let ballots = vec![ballot(&[2])];
     let (winner, counts) = run_fptp(&ballots, 3);
     assert_eq!(winner, Some(2));
     assert_eq!(counts.get(&2), Some(&1));
@@ -316,11 +308,11 @@ fn test_fptp_single_voter() {
 #[test]
 fn test_fptp_determinism() {
     let ballots = vec![
-        ballot(&[1, 0, 2]),
-        ballot(&[2, 1, 0]),
-        ballot(&[0, 2, 1]),
-        ballot(&[1, 2, 0]),
-        ballot(&[0, 1, 2]),
+        ballot(&[1]),
+        ballot(&[2]),
+        ballot(&[0]),
+        ballot(&[1]),
+        ballot(&[0]),
     ];
     let (w1, c1) = run_fptp(&ballots, 3);
     let (w2, c2) = run_fptp(&ballots, 3);
@@ -729,7 +721,7 @@ fn mint_ballots_with_outputs(outputs: Vec<(u64, u64)>) -> StealthSecretTransferD
     }
 }
 
-/// Creates a RankedVote component with the given parameters and returns
+/// Creates a Vote component with the given parameters and returns
 /// (component_address, ballot_resource_address, test, account, proof, secret).
 fn create_vote(
     voter_count: u64,
@@ -746,7 +738,7 @@ fn create_vote(
     tari_template_test_tooling::crypto::RistrettoSecretKey,
 ) {
     let mut test = TemplateTest::my_crate();
-    let template_address = test.get_template_address("RankedVote");
+    let template_address = test.get_template_address("Vote");
     let (account, proof, secret) = test.create_funded_account();
 
     let mint_data = mint_ballots(voter_count);
@@ -810,7 +802,7 @@ fn create_vote_expect_failure(
     expires_at_epoch: u64,
 ) -> tari_template_test_tooling::engine_types::commit_result::RejectReason {
     let mut test = TemplateTest::my_crate();
-    let template_address = test.get_template_address("RankedVote");
+    let template_address = test.get_template_address("Vote");
     let (_account, _proof, secret) = test.create_funded_account();
 
     let mint_data = mint_ballots(voter_count);
@@ -838,26 +830,26 @@ fn create_vote_expect_failure(
 
 #[test]
 fn rejects_zero_voter_count() {
-    let reason = create_vote_expect_failure(0, 3, 1, TallyMethod::SequentialIrv, 1000);
+    let reason = create_vote_expect_failure(0, 3, 1, TallyMethod::Irv, 1000);
     assert_reject_reason(reason, "voter_count must be positive");
 }
 
 #[test]
 fn rejects_zero_candidates() {
-    let reason = create_vote_expect_failure(1, 0, 1, TallyMethod::SequentialIrv, 1000);
+    let reason = create_vote_expect_failure(1, 0, 1, TallyMethod::Irv, 1000);
     assert_reject_reason(reason, "num_candidates must be positive");
 }
 
 #[test]
 fn rejects_more_winners_than_candidates() {
-    let reason = create_vote_expect_failure(1, 2, 3, TallyMethod::SequentialIrv, 1000);
+    let reason = create_vote_expect_failure(1, 2, 3, TallyMethod::Irv, 1000);
     assert_reject_reason(reason, "num_winners cannot exceed num_candidates");
 }
 
 #[test]
 fn rejects_ballot_after_vote_closed() {
     let (component, _ballot_resource, mut test, account, proof, secret) =
-        create_vote(1, 2, 1, TallyMethod::SequentialIrv, 1000);
+        create_vote(1, 2, 1, TallyMethod::Irv, 1000);
 
     // End the vote.
     let end_transaction = test
@@ -886,7 +878,7 @@ fn rejects_ballot_after_vote_closed() {
 #[test]
 fn rejects_ballot_after_expiration() {
     let (component, _ballot_resource, mut test, account, proof, secret) =
-        create_vote(1, 2, 1, TallyMethod::SequentialIrv, 10);
+        create_vote(1, 2, 1, TallyMethod::Irv, 10);
 
     // Advance the epoch past the expiration.
     test.set_virtual_substate(
@@ -914,7 +906,7 @@ fn rejects_ballot_after_expiration() {
 #[test]
 fn rejects_wrong_token_while_vote_active() {
     let (component, _ballot_resource, mut test, account, proof, secret) =
-        create_vote(1, 2, 1, TallyMethod::SequentialIrv, 1000);
+        create_vote(1, 2, 1, TallyMethod::Irv, 1000);
 
     // The vote is live and unexpired, so the active and expiration checks pass and the
     // resource check fires: the bucket must hold the ballot token, not TARI.
@@ -936,7 +928,7 @@ fn rejects_wrong_token_while_vote_active() {
 #[test]
 fn rejects_invalid_ranking() {
     let mut test = TemplateTest::my_crate();
-    let template_address = test.get_template_address("RankedVote");
+    let template_address = test.get_template_address("Vote");
     let (_account, _proof, secret) = test.create_funded_account();
 
     // Create the vote manually (rather than via `create_vote`) so the ballot mint
@@ -953,7 +945,7 @@ fn rejects_invalid_ranking() {
                 1u64,
                 2u32,
                 1u32,
-                TallyMethod::SequentialIrv,
+                TallyMethod::Irv,
                 1000u64,
                 ballot_mint.statement,
             ],
@@ -1007,9 +999,145 @@ fn rejects_invalid_ranking() {
 }
 
 #[test]
+fn rejects_full_ranking_ballot_in_fptp_election() {
+    // Method/ballot-shape conflict: an FPTP election must not accept a ranked-choice ballot
+    // (e.g. from client software that presented the election as ranked) — it is rejected
+    // rather than silently tallied as a single choice.
+    let mut test = TemplateTest::my_crate();
+    let template_address = test.get_template_address("Vote");
+    let (_account, _proof, secret) = test.create_funded_account();
+
+    let ballot_mint = mint_ballots(1);
+    let transaction = test
+        .transaction()
+        .allocate_resource_address("ballot_res")
+        .call_function(
+            template_address,
+            "new",
+            args![
+                Workspace("ballot_res"),
+                1u64,
+                2u32,
+                1u32,
+                TallyMethod::Fptp,
+                1000u64,
+                ballot_mint.statement,
+            ],
+        )
+        .build_and_seal(&secret);
+    let result = test.execute_expect_success(transaction, vec![]);
+    let component = result
+        .finalize
+        .result
+        .accept()
+        .unwrap()
+        .up_iter()
+        .find_map(|(id, _)| id.as_component_address())
+        .expect("component address");
+    let ballot_resource = test
+        .read_only_state_store()
+        .get_all_resources()
+        .expect("resources")
+        .into_iter()
+        .find(|(address, resource)| resource.resource_type().is_stealth() && *address != TARI_TOKEN)
+        .map(|(address, _)| address)
+        .expect("ballot resource");
+
+    let ballot_spend = generate_transfer_data(
+        [MaskAndValue {
+            mask: ballot_mint.output_masks[0].clone(),
+            value: 1,
+        }],
+        0u64,
+        Vec::<u64>::new(),
+        1u64,
+    );
+    let transaction = Transaction::builder_localnet(Epoch(100))
+        .stealth_transfer(ballot_resource, ballot_spend.statement)
+        .put_last_instruction_output_on_workspace("vote")
+        .call_method(
+            component,
+            "cast_ballot",
+            args![Workspace("vote"), vec![0u32, 1u32]],
+        )
+        .finish()
+        .add_signer(&test.to_public_key_bytes(), &ballot_mint.output_masks[0])
+        .seal(test.secret_key());
+    let reject = test.execute_expect_failure(transaction, vec![]);
+    assert_reject_reason(reject, "FPTP ballots must be a single choice");
+}
+
+#[test]
+fn rejects_single_choice_ballot_in_ranked_election() {
+    // The mirror-image conflict: a ranked election must not accept a single-choice ballot.
+    let mut test = TemplateTest::my_crate();
+    let template_address = test.get_template_address("Vote");
+    let (_account, _proof, secret) = test.create_funded_account();
+
+    let ballot_mint = mint_ballots(1);
+    let transaction = test
+        .transaction()
+        .allocate_resource_address("ballot_res")
+        .call_function(
+            template_address,
+            "new",
+            args![
+                Workspace("ballot_res"),
+                1u64,
+                2u32,
+                1u32,
+                TallyMethod::Irv,
+                1000u64,
+                ballot_mint.statement,
+            ],
+        )
+        .build_and_seal(&secret);
+    let result = test.execute_expect_success(transaction, vec![]);
+    let component = result
+        .finalize
+        .result
+        .accept()
+        .unwrap()
+        .up_iter()
+        .find_map(|(id, _)| id.as_component_address())
+        .expect("component address");
+    let ballot_resource = test
+        .read_only_state_store()
+        .get_all_resources()
+        .expect("resources")
+        .into_iter()
+        .find(|(address, resource)| resource.resource_type().is_stealth() && *address != TARI_TOKEN)
+        .map(|(address, _)| address)
+        .expect("ballot resource");
+
+    let ballot_spend = generate_transfer_data(
+        [MaskAndValue {
+            mask: ballot_mint.output_masks[0].clone(),
+            value: 1,
+        }],
+        0u64,
+        Vec::<u64>::new(),
+        1u64,
+    );
+    let transaction = Transaction::builder_localnet(Epoch(100))
+        .stealth_transfer(ballot_resource, ballot_spend.statement)
+        .put_last_instruction_output_on_workspace("vote")
+        .call_method(
+            component,
+            "cast_ballot",
+            args![Workspace("vote"), vec![0u32]],
+        )
+        .finish()
+        .add_signer(&test.to_public_key_bytes(), &ballot_mint.output_masks[0])
+        .seal(test.secret_key());
+    let reject = test.execute_expect_failure(transaction, vec![]);
+    assert_reject_reason(reject, "ranking must list every candidate exactly once");
+}
+
+#[test]
 fn rejects_output_count_mismatch() {
     let mut test = TemplateTest::my_crate();
-    let template_address = test.get_template_address("RankedVote");
+    let template_address = test.get_template_address("Vote");
     let (_account, _proof, secret) = test.create_funded_account();
 
     for (amounts, voter_count) in [(vec![2u64], 2u64), (vec![1u64, 2u64], 3u64)] {
@@ -1028,7 +1156,7 @@ fn rejects_output_count_mismatch() {
                     voter_count,
                     2u32,
                     1u32,
-                    TallyMethod::SequentialIrv,
+                    TallyMethod::Irv,
                     1000u64,
                     ballot_mint.statement,
                 ],
@@ -1045,7 +1173,7 @@ fn rejects_output_count_mismatch() {
 #[test]
 fn rejects_zero_value_ballot_shapes_at_construction() {
     let mut test = TemplateTest::my_crate();
-    let template_address = test.get_template_address("RankedVote");
+    let template_address = test.get_template_address("Vote");
     let (_account, _proof, secret) = test.create_funded_account();
 
     // [2,0] with voter_count 2 has the right TOTAL (2) and the right OUTPUT COUNT (2), so it
@@ -1065,7 +1193,7 @@ fn rejects_zero_value_ballot_shapes_at_construction() {
                 2u64,
                 2u32,
                 1u32,
-                TallyMethod::SequentialIrv,
+                TallyMethod::Irv,
                 1000u64,
                 bad_mint.statement,
             ],
@@ -1091,7 +1219,7 @@ fn rejects_zero_value_ballot_shapes_at_construction() {
                 3u64,
                 2u32,
                 1u32,
-                TallyMethod::SequentialIrv,
+                TallyMethod::Irv,
                 1000u64,
                 bad_mint.statement,
             ],
@@ -1107,7 +1235,7 @@ fn rejects_zero_value_ballot_shapes_at_construction() {
 #[test]
 fn rejects_end_vote_expired_before_deadline() {
     let (component, _ballot_resource, mut test, _account, _proof, secret) =
-        create_vote(1, 2, 1, TallyMethod::SequentialIrv, 100);
+        create_vote(1, 2, 1, TallyMethod::Irv, 100);
 
     // Epoch is still 0 (default), well before expiration at 100.
     let transaction = test
@@ -1122,7 +1250,7 @@ fn rejects_end_vote_expired_before_deadline() {
 #[test]
 fn anyone_can_finalize_expired_vote() {
     let (component, _ballot_resource, mut test, _account, _proof, _secret) =
-        create_vote(1, 2, 1, TallyMethod::SequentialIrv, 0);
+        create_vote(1, 2, 1, TallyMethod::Irv, 0);
 
     // Advance the epoch past the expiration, so the vote is finalizable.
     test.set_virtual_substate(
@@ -1143,7 +1271,7 @@ fn anyone_can_finalize_expired_vote() {
 #[test]
 fn ballot_minting_is_permanently_revoked() {
     let (component, ballot_resource, test, _account, _proof, _secret) =
-        create_vote(3, 2, 1, TallyMethod::SequentialIrv, 1000);
+        create_vote(3, 2, 1, TallyMethod::Irv, 1000);
 
     // The one-of mint badge is sealed inside the component; it is the component vault that does
     // not hold ballot tokens.
@@ -1218,7 +1346,7 @@ fn ballot_minting_is_permanently_revoked() {
     assert_eq!(badge_def.total_supply(), Some(Amount::from(1u64)));
 
     // Exactly one ballot per eligible voter was minted at construction, and the stored
-    // voter_count matches (field index 8 = the 9th field of `RankedVote`, in declaration order,
+    // voter_count matches (field index 8 = the 9th field of `Vote`, in declaration order,
     // after `tally_method`).
     assert_eq!(ballot_def.total_supply(), Some(Amount::from(3u64)));
     let voter_count: u64 = test.extract_component_value(component, "8");
@@ -1229,13 +1357,13 @@ fn ballot_minting_is_permanently_revoked() {
 //
 // Mirrors the testnet scenario in `client/integration/src/main.rs` entirely in-process
 // (no testnet needed): the vote is created, each voter spends their stealth ballot UTXO
-// into `cast_ballot`, and `end_vote` produces the expected IRV winner. A single-winner election
-// always takes the IRV path regardless of the pinned multi-winner method.
+// into `cast_ballot`, and `end_vote` produces the expected IRV winner (a single-winner
+// IRV election pins `TallyMethod::Irv`).
 
 #[test]
 fn end_to_end_three_voter_election() {
     let mut test = TemplateTest::my_crate();
-    let template_address = test.get_template_address("RankedVote");
+    let template_address = test.get_template_address("Vote");
     let (_account, proof, secret) = test.create_funded_account();
 
     // Same scenario as the integration client: 3 voters, 3 candidates, 1 winner.
@@ -1254,7 +1382,7 @@ fn end_to_end_three_voter_election() {
                 3u64,
                 3u32,
                 1u32,
-                TallyMethod::SequentialIrv,
+                TallyMethod::Irv,
                 1000u64,
                 ballot_mint.statement,
             ],
@@ -1383,10 +1511,9 @@ fn end_vote_topics(
 }
 
 #[test]
-fn single_winner_vote_always_uses_irv() {
-    // A single-winner election uses IRV regardless of the configured multi-winner method: the
-    // method only applies to `num_winners > 1`.
-    let topics = end_vote_topics(1, 3, 1, TallyMethod::SequentialIrv);
+fn single_winner_irv_vote_dispatches_irv() {
+    // A single-winner IRV election runs the instant-runoff tally.
+    let topics = end_vote_topics(1, 3, 1, TallyMethod::Irv);
     assert!(
         has_event(&topics, "Result"),
         "expected an IRV tally event, got {topics:?}",
@@ -1398,15 +1525,33 @@ fn single_winner_vote_always_uses_irv() {
 }
 
 #[test]
-fn single_winner_vote_ignores_stv_method() {
-    let topics = end_vote_topics(1, 3, 1, TallyMethod::Stv);
-    assert!(
-        has_event(&topics, "Result"),
-        "expected an IRV tally event, got {topics:?}",
+fn rejects_multi_winner_method_with_single_winner() {
+    // Multi-winner methods are rejected for single-winner elections: the constructor must not
+    // silently run a different tally than the one pinned.
+    let reason = create_vote_expect_failure(1, 3, 1, TallyMethod::Stv, 1000);
+    assert_reject_reason(
+        reason,
+        "multi-winner methods (SequentialIrv, Stv) require num_winners > 1",
     );
-    assert!(
-        !has_event(&topics, "ResultStv"),
-        "STV must not run for a single-winner election, got {topics:?}",
+    let reason = create_vote_expect_failure(1, 3, 1, TallyMethod::SequentialIrv, 1000);
+    assert_reject_reason(
+        reason,
+        "multi-winner methods (SequentialIrv, Stv) require num_winners > 1",
+    );
+}
+
+#[test]
+fn rejects_single_winner_method_with_multiple_winners() {
+    // Single-winner methods are rejected for multi-winner elections, for the same reason.
+    let reason = create_vote_expect_failure(1, 3, 2, TallyMethod::Irv, 1000);
+    assert_reject_reason(
+        reason,
+        "single-winner methods (Irv, Fptp) require num_winners == 1",
+    );
+    let reason = create_vote_expect_failure(1, 3, 2, TallyMethod::Fptp, 1000);
+    assert_reject_reason(
+        reason,
+        "single-winner methods (Irv, Fptp) require num_winners == 1",
     );
 }
 
@@ -1430,8 +1575,8 @@ fn multi_winner_vote_dispatches_stv() {
 
 #[test]
 fn fptp_vote_dispatches_fptp() {
-    // An FPTP election runs the first-preference tally even though `num_winners == 1` would
-    // otherwise fall back to IRV — FPTP is pinned at construction and takes precedence.
+    // An FPTP election runs the single-choice tally — the pinned method takes precedence and
+    // there is no fallback to IRV.
     let topics = end_vote_topics(1, 2, 1, TallyMethod::Fptp);
     assert!(
         has_event(&topics, "ResultFptp"),
@@ -1447,10 +1592,10 @@ fn fptp_vote_dispatches_fptp() {
 fn fptp_yes_no_end_vote_returns_plurality_winner() {
     // Full template path for the yes/no use case: 2 candidates, 3 voters, candidate 0 wins 2-1.
     let mut test = TemplateTest::my_crate();
-    let template_address = test.get_template_address("RankedVote");
+    let template_address = test.get_template_address("Vote");
     let (_account, proof, secret) = test.create_funded_account();
 
-    let choices: [[u32; 2]; 3] = [[0, 1], [0, 1], [1, 0]];
+    let choices: [[u32; 1]; 3] = [[0], [0], [1]];
 
     // Create the vote; the constructor mints one amount-1 ballot UTXO per voter.
     let ballot_mint = mint_ballots(3);
@@ -1515,7 +1660,7 @@ fn fptp_yes_no_end_vote_returns_plurality_winner() {
         test.execute_expect_success(transaction, vec![]);
     }
 
-    // FPTP tally: candidate 0 ("yes") has 2 first-preference votes, candidate 1 ("no") has 1.
+    // FPTP tally: candidate 0 ("yes") has 2 choices, candidate 1 ("no") has 1.
     let transaction = test
         .transaction()
         .call_method(component, "end_vote", args![])
@@ -1532,16 +1677,19 @@ fn fptp_yes_no_end_vote_returns_plurality_winner() {
 
 #[test]
 fn rejects_fptp_with_multiple_winners() {
-    // FPTP is single-winner by definition: counting first preferences for multiple seats would
-    // not be a defined tally, so `new` rejects it outright.
+    // FPTP is single-winner by definition: a single-choice tally for multiple seats would not
+    // be a defined method, so `new` rejects it outright.
     let reason = create_vote_expect_failure(1, 2, 2, TallyMethod::Fptp, 1000);
-    assert_reject_reason(reason, "TallyMethod::Fptp is single-winner only");
+    assert_reject_reason(
+        reason,
+        "single-winner methods (Irv, Fptp) require num_winners == 1",
+    );
 }
 
 #[test]
 fn end_vote_rejected_for_non_initiator() {
     let (component, _ballot_resource, mut test, _account, _proof, secret) =
-        create_vote(1, 2, 1, TallyMethod::SequentialIrv, 1000);
+        create_vote(1, 2, 1, TallyMethod::Irv, 1000);
 
     // A different account (not the caller of `new`) tries to end the vote. The access rule on
     // `end_vote` requires the initiator's public key.

@@ -15,9 +15,9 @@ use std::collections::BTreeMap;
 /// in the component, so the outcome cannot be picked after the fact based on which method gives
 /// a more favorable result.
 ///
-/// `Fptp` is single-winner only; `SequentialIrv` and `Stv` are multi-winner methods
-/// (`num_winners > 1`). With `SequentialIrv` or `Stv` and `num_winners == 1`, the tally falls
-/// back to plain single-winner IRV.
+/// `Irv` and `Fptp` are single-winner methods (`num_winners == 1`); `SequentialIrv` and `Stv`
+/// are multi-winner methods (`num_winners > 1`). The constructor rejects any method/seat-count
+/// mismatch, so the pinned method is always exactly the tally that runs.
 ///
 /// Defined here (rather than in the template) so tests can construct it without linking the
 /// template crate; the template re-exports it at its crate root, keeping the on-chain ABI
@@ -30,11 +30,14 @@ pub enum TallyMethod {
     /// Single transferable vote with the Droop quota (proportional representation).
     #[n(1)]
     Stv,
-    /// First past the post: single-winner only (`num_winners == 1`). Counts each ballot's first
-    /// preference; the candidate with the most votes wins (no majority required). With exactly
+    /// First past the post: single-winner only (`num_winners == 1`). Each ballot is a single
+    /// choice; the candidate with the most choices wins (no majority required). With exactly
     /// two candidates this is a plain yes/no vote, and with more it is a single-choice poll.
     #[n(2)]
     Fptp,
+    /// Single-winner instant-runoff voting (`num_winners == 1`).
+    #[n(3)]
+    Irv,
 }
 
 /// The candidate with a strictly unique, positive maximum count, or `None` when the maximum is
@@ -465,31 +468,34 @@ pub mod sequential_irv {
 
 /// Pure first-past-the-post tally logic, isolated from the template engine so it can be
 /// unit-tested directly without stealth-transfer machinery. Returns simple types (winner +
-/// first-preference counts) with no dependency on template ABI traits; the template's
-/// `result()` method wraps the output into the ABI-compatible `FptpResult` struct.
+/// choice counts) with no dependency on template ABI traits; the template's `result()` method
+/// wraps the output into the ABI-compatible `FptpResult` struct.
 pub mod fptp {
     use super::unique_plurality_winner;
     use std::collections::BTreeMap;
 
-    /// First-past-the-post tally over a set of ranked ballots. Each ballot is a permutation of
-    /// `0..num_candidates` ordered by preference; only the first preference (`ranking[0]`)
-    /// counts as a vote.
+    /// First-past-the-post tally over a set of single-choice ballots. Each ballot is a
+    /// one-element `[choice]`; there are no other entries — the template's `cast_ballot`
+    /// rejects any ballot that is not a validated single choice before this function is
+    /// reached, so a ballot can never be silently mis-tallied under a different method.
     ///
-    /// The candidate with the most first-preference votes wins — no majority is required. A tie
+    /// The candidate with the most choices wins — no majority is required. A tie
     /// for the most votes has no winner: returns `None` (zero turnout is the degenerate tie —
     /// every count is 0 — and yields the same result). Ties and zero turnout are decided by the
     /// same `unique_plurality_winner` check; the winner must hold a strictly unique count.
     ///
     /// Returns `(winner, counts)` where `winner` is `Some(candidate_id)` or `None`, and `counts`
-    /// maps every candidate to its first-preference count.
+    /// maps every candidate to its choice count.
     pub fn run_fptp(
         ballots: &[Vec<u32>],
         num_candidates: u32,
     ) -> (Option<u32>, BTreeMap<u32, u64>) {
         let mut counts: BTreeMap<u32, u64> = (0..num_candidates).map(|c| (c, 0u64)).collect();
         for ballot in ballots {
-            if let Some(&first) = ballot.first().filter(|first| counts.contains_key(first)) {
-                *counts.get_mut(&first).expect("first preference counted") += 1;
+            // Ballots are validated single choices upstream, so the first (only) entry is the
+            // vote. The `filter` guard is defensive against malformed input in unit tests.
+            if let Some(&choice) = ballot.first().filter(|choice| counts.contains_key(choice)) {
+                *counts.get_mut(&choice).expect("choice counted") += 1;
             }
         }
 
