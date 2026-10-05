@@ -1,5 +1,5 @@
 [workspace]
-members = ["tally", "templates/ranked_voting", "client/integration"]
+members = ["tally", "templates/confidential_voting", "client/integration"]
 resolver = "2"
 
 [profile.release]
