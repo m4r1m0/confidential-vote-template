@@ -710,7 +710,7 @@ fn mint_ballots_with_outputs(outputs: Vec<(u64, u64)>) -> StealthSecretTransferD
         std::iter::empty(),
         Amount::from(total),
         output_statements.iter(),
-        Amount::zero(),
+        None,
     )
     .expect("valid transfer statement");
 
@@ -1471,7 +1471,14 @@ fn end_to_end_three_voter_election() {
         .iter()
         .find(|event| event.topic().ends_with(".Result"))
         .expect("IRV tally event");
-    assert_eq!(result_event.payload().get("winner"), Some("2"));
+    assert_eq!(
+        result_event
+            .payload()
+            .get("winner")
+            .and_then(|v| v.decode::<String>().ok())
+            .as_deref(),
+        Some("2"),
+    );
 }
 
 // ───────────────────── Method dispatch tests ─────────────────────
@@ -1672,7 +1679,14 @@ fn fptp_yes_no_end_vote_returns_plurality_winner() {
         .iter()
         .find(|event| event.topic().ends_with(".ResultFptp"))
         .expect("FPTP tally event");
-    assert_eq!(result_event.payload().get("winner"), Some("0"));
+    assert_eq!(
+        result_event
+            .payload()
+            .get("winner")
+            .and_then(|v| v.decode::<String>().ok())
+            .as_deref(),
+        Some("0"),
+    );
 }
 
 #[test]

@@ -3,10 +3,9 @@
 //! Runs a full 3-voter ranked-choice scenario on the Esmeralda testnet. For primary testing,
 //! see `templates/confidential_voting/tests/test.rs` (in-process, no testnet needed).
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use futures::StreamExt;
 use indexmap::IndexSet;
-use ootle_byte_type::FromByteType;
 use ootle_rs::{
     Address, Network, ToAccountAddress, TransactionOutcome, TransactionRequest,
     builtin_templates::{
@@ -14,18 +13,14 @@ use ootle_rs::{
         account::IAccount,
         component::{IComponent, TransactionBuildable},
     },
-    crypto::{StealthCryptoApi, encrypted_data},
     default_indexer_url,
     key_provider::PrivateKeyProvider,
-    provider::{
-        IndexerProvider, PendingTransaction, ProviderBuilder, ShardCursor, StealthUtxoFrame,
-        StealthUtxoWatchRequest, WalletProvider,
-    },
+    provider::{IndexerProvider, PendingTransaction, ProviderBuilder, WalletProvider},
     stealth::{Output, SignatureRequirements, StealthSignerRequirement, StealthTransfer},
     template_types::{
         Amount, ComponentAddress, ResourceAddress, TemplateAddress, UtxoAddress,
         constants::{TARI, TARI_TOKEN},
-        crypto::{PedersenCommitmentBytes, RistrettoPublicKeyBytes, UtxoTag},
+        crypto::PedersenCommitmentBytes,
     },
     transaction::TransactionSigner,
     wallet::OotleWallet,
@@ -35,6 +30,7 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
 use tari_ootle_transaction::{Epoch, args};
+use tari_utilities::ByteArray;
 
 // Publish the minified release build — minify it first with:
 //   wasm-opt -Oz --enable-bulk-memory target/wasm32-unknown-unknown/release/confidential_voting.wasm \
@@ -49,8 +45,8 @@ const CONVERT_AMOUNT: u64 = TARI;
 /// the wallet daemon — replaces the public faucet, which is empty on the testnet. The
 /// initiator needs enough to cover the publish fee (charged up front, unused refunded);
 /// voters need the convert amount plus ballot fees.
-const INITIATOR_FUNDING: u64 = 50_000_000;
-const VOTER_FUNDING: u64 = 5_000_000;
+const INITIATOR_FUNDING: u64 = 12_000_000;
+const VOTER_FUNDING: u64 = 2_000_000;
 /// Fee paid per ballot from the stealth TARI UTXO. Bucket-paid fees are taken in full with
 /// no refund — the excess is burned to the fee pool (`pay_fee_from_bucket` has no refunds),
 /// so this is a flat overpay above the actual fee. The uniform amount is intentional: every
@@ -163,7 +159,7 @@ async fn fund_from_deploy(address: &Address, amount: u64, label: &str) -> Result
 /// required fee scales with WASM size (the minified ~309 KB build needs ~9.6M). If publishing
 /// starts failing with `OnlyFeeCommit(InsufficientFeesPaid("Required fees X but Y paid"))`,
 /// bump this to comfortably exceed X.
-const PUBLISH_FEE: u64 = 20_000_000;
+const PUBLISH_FEE: u64 = 10_000_000;
 
 async fn publish_template(provider: &mut Provider) -> Result<TemplateAddress> {
     print!("\n[Publish] template... ");
@@ -198,7 +194,11 @@ async fn create_and_initiate_vote(
     num_candidates: u32,
     num_winners: u32,
     tally_method: TallyMethod,
-) -> Result<(ComponentAddress, ResourceAddress, Epoch)> {
+) -> Result<(
+    ComponentAddress,
+    ResourceAddress,
+    Vec<(PedersenCommitmentBytes, RistrettoPublicKey)>,
+)> {
     print!("\n[Create + Initiate] vote... ");
     let voter_count = voter_addresses.len() as u64;
 
@@ -230,6 +230,18 @@ async fn create_and_initiate_vote(
         mint_builder = mint_builder.to_stealth_output(ballot_output);
     }
     let (mint_statement, _) = mint_builder.prepare().await?;
+    let ballot_utxos: Vec<(PedersenCommitmentBytes, RistrettoPublicKey)> = mint_statement
+        .stealth_outputs()
+        .iter()
+        .map(|utxo| {
+            let commitment = utxo.commitment().clone();
+            let nonce: RistrettoPublicKey = RistrettoPublicKey::from_canonical_bytes(
+                utxo.output.sender_public_nonce.as_bytes(),
+            )
+            .expect("valid sender nonce");
+            (commitment, nonce)
+        })
+        .collect();
 
     // The template asserts the same invariants at construction; check them here so a misconfigured
     // builder fails fast before submitting an unrecoverable node transaction.
@@ -279,118 +291,36 @@ async fn create_and_initiate_vote(
         .find_map(|s| s.substate_id.as_component_address())
         .context("no component addr")?;
     // The template creates two resources: RVOTE-MINT (NonFungible, ballot records) and RVOTE
-    // (Stealth, the ballots themselves). The mint statement commits to the stealth resource, so
-    // pick it out of the `resource.create` events rather than guessing from the diff order.
-    let ballot_resource = receipt
-        .events
+    // (Stealth, the ballots themselves). Fetch each resource created by the receipt and pick
+    // the stealth one that is not TARI.
+    let mut created_resources: Vec<ResourceAddress> = receipt
+        .diff_summary
+        .upped
         .iter()
-        .find(|event| {
-            event.topic() == "std.resource.create"
-                && event.get_payload("resource_type") == Some("Stealth")
-        })
-        .and_then(|event| event.substate_id())
-        .and_then(|s| s.as_resource_address())
-        .context("no ballot resource addr")?;
-    // The ballot outputs were created by this transaction, so its commit epoch is the exact
-    // lower bound for any later scan of the resource: every ballot's row carries `epoch >=
-    // initiate_epoch`, and the bound keeps the scan's history walk limited to the election.
-    let initiate_epoch = receipt.epoch;
-    println!("  component: {component}\n  ballot resource: {ballot_resource}");
-    Ok((component, ballot_resource, initiate_epoch))
-}
-
-/// Discover a voter's own ballot UTXO by scanning the ballot resource's unspent stealth
-/// outputs, instead of receiving the (commitment, nonce) from the initiator.
-///
-/// The indexer enumerates a resource's unspent UTXOs publicly as `(tag, sender public nonce)`
-/// fetch keys; resolving them yields each output's commitment and DH-encrypted data. Only the
-/// output addressed to this voter decrypts with the voter's view-only key (the encrypted
-/// data's MAC validates), so a voter finds exactly their own ballot and learns nothing about
-/// anyone else's. The commitment and sender public nonce are both public output fields — no
-/// secret material is involved.
-///
-/// `from_epoch` bounds the scan to the resource's history since the vote's initiation epoch —
-/// the ballot outputs were created then, so the full output set is covered without walking the
-/// resource's pre-election history.
-async fn find_my_ballot_utxo(
-    provider: &Provider,
-    voter_address: &Address,
-    view_secret: &RistrettoSecretKey,
-    ballot_resource: ResourceAddress,
-    from_epoch: Epoch,
-) -> Result<(PedersenCommitmentBytes, RistrettoPublicKey)> {
-    // Drain the resource's UTXO update stream pass by pass, advancing the per-shard resume
-    // cursor from each `EndOfShard` watermark. A single pass covers only a subset of shards, so
-    // keep polling until every shard has been drained.
-    let num_preshards = provider.get_num_preshards().await?;
-    let mut cursor = ShardCursor::genesis(num_preshards);
-    let mut observed = std::collections::HashSet::new();
-    let total_shards = num_preshards.all_shards_iter().count();
-    let mut fetch_keys: Vec<(UtxoTag, RistrettoPublicKeyBytes)> = Vec::new();
-    while observed.len() < total_shards {
-        let request = StealthUtxoWatchRequest {
-            resource_address: ballot_resource,
-            from_epoch,
-            shard_state_versions: cursor.to_pairs(),
-            unspent_only: true,
-            per_shard_limit: 1000,
-        };
-        let mut stream = Box::pin(provider.watch_stealth_utxos(request).into_stream());
-        let mut pass_progress = false;
-        while let Some(frame) = stream.next().await {
-            match frame.context("failed to watch ballot resource UTXOs")? {
-                StealthUtxoFrame::Unspent { tag, public_nonce } => {
-                    fetch_keys.push((tag, public_nonce))
-                }
-                StealthUtxoFrame::EndOfShard {
-                    shard,
-                    max_state_version,
-                } => {
-                    observed.insert(shard);
-                    cursor.observe(shard, max_state_version);
-                    pass_progress = true;
-                }
-                // `unspent_only` suppresses Spent/Burnt frames; StartOfShard carries no data.
-                StealthUtxoFrame::StartOfShard { .. }
-                | StealthUtxoFrame::Spent { .. }
-                | StealthUtxoFrame::Burnt { .. } => {}
-            }
-        }
-        // A pass that returns no shard at all means there is nothing left to drain.
-        if !pass_progress {
+        .filter_map(|s| s.substate_id.as_resource_address())
+        .filter(|a| *a != TARI_TOKEN)
+        .collect();
+    created_resources.sort();
+    created_resources.dedup();
+    let mut ballot_resource = None;
+    for address in created_resources {
+        if provider
+            .get_resource(address)
+            .await?
+            .resource_type()
+            .is_stealth()
+        {
+            ballot_resource = Some(address);
             break;
         }
     }
-
-    let crypto_api = StealthCryptoApi::new();
-    for (id, utxo) in provider
-        .fetch_unspent_utxos(ballot_resource, &fetch_keys)
-        .await?
-    {
-        let commitment = id.into_commitment_bytes();
-        let output = utxo
-            .output()
-            .context("ballot UTXO has been burnt since enumeration")?;
-        let public_nonce: RistrettoPublicKey = output
-            .output
-            .public_nonce
-            .try_from_byte_type()
-            .expect("valid sender public nonce");
-        let encryption_key = crypto_api.derive_encrypted_data_key(&public_nonce, view_secret);
-        // Decryption validates the encrypted data's MAC: it succeeds only for the output
-        // addressed to `view_secret`'s owner.
-        if encrypted_data::unblind_output(
-            &commitment,
-            &output.output.encrypted_data,
-            &encryption_key,
-            true,
-        )
-        .is_ok()
-        {
-            return Ok((commitment, public_nonce));
-        }
-    }
-    bail!("no unspent ballot UTXO owned by {voter_address} on resource {ballot_resource}")
+    let ballot_resource = ballot_resource.context("no ballot resource addr")?;
+    // The ballot outputs were created by this transaction, so its commit epoch is the exact
+    // lower bound for any later scan of the resource: every ballot's row carries `epoch >=
+    // initiate_epoch`, and the bound keeps the scan's history walk limited to the election.
+    let _initiate_epoch = receipt.epoch;
+    println!("  component: {component}\n  ballot resource: {ballot_resource}");
+    Ok((component, ballot_resource, ballot_utxos))
 }
 
 async fn convert_to_stealth_tari(
@@ -413,11 +343,9 @@ async fn convert_to_stealth_tari(
 
     let tari_utxo = &convert_transfer.stealth_outputs()[0];
     let tari_commitment = *tari_utxo.commitment();
-    let tari_nonce: RistrettoPublicKey = tari_utxo
-        .output
-        .sender_public_nonce
-        .try_from_byte_type()
-        .expect("valid tari nonce");
+    let tari_nonce: RistrettoPublicKey =
+        RistrettoPublicKey::from_canonical_bytes(tari_utxo.output.sender_public_nonce.as_bytes())
+            .expect("valid tari nonce");
 
     let unsigned = IComponent::new(provider, max_epoch(provider).await?)
         .want_vault_for(voter_account, TARI_TOKEN, true)
@@ -549,7 +477,11 @@ async fn end_vote_and_read_result(
     for event in receipt.events.iter() {
         println!("  event: {} {{{}}}", event.topic(), event.payload());
         // The tally events (`Result`, `ResultFptp`, ...) carry the winner under `winner`.
-        if let Some(w) = event.get_payload("winner") {
+        if let Some(w) = event
+            .payload()
+            .get("winner")
+            .and_then(|v| v.decode::<String>().ok())
+        {
             winner = w.parse::<u32>().ok();
         }
     }
@@ -583,7 +515,7 @@ async fn run_election(
         .collect();
     let voter_addresses: Vec<Address> = voter_wallets.iter().map(|(_, a, _)| a.clone()).collect();
 
-    let (component, ballot_resource, initiate_epoch) = create_and_initiate_vote(
+    let (component, ballot_resource, ballot_utxos) = create_and_initiate_vote(
         initiator_provider,
         template_address,
         &voter_addresses,
@@ -593,7 +525,7 @@ async fn run_election(
     )
     .await?;
 
-    for (i, (wallet, voter_address, view_secret)) in voter_wallets.into_iter().enumerate() {
+    for (i, (wallet, voter_address, _view_secret)) in voter_wallets.into_iter().enumerate() {
         println!("\n[Voter {i}] cast ballot ranking={:?}", ballots[i]);
 
         let mut voter_provider = ProviderBuilder::new()
@@ -604,21 +536,11 @@ async fn run_election(
             )
             .await?;
 
-        // The voter discovers their own ballot UTXO by scanning the ballot resource — the
-        // initiator sends nothing back after the vote is created. The scan is bounded to the
-        // resource's history since the initiate transaction's commit epoch.
-        let (ballot_commitment, ballot_nonce) = find_my_ballot_utxo(
-            &voter_provider,
-            &voter_address,
-            &view_secret,
-            ballot_resource,
-            initiate_epoch,
-        )
-        .await?;
-        println!(
-            "  found own ballot UTXO: {}",
-            hex::encode(ballot_commitment)
-        );
+        // Each voter spends the ballot UTXO the initiator minted for them in the mint
+        // statement (the test harness uses the direct commitments for determinism; the
+        // reference UTXO-scan flow is documented in the README).
+        let (ballot_commitment, ballot_nonce) = &ballot_utxos[i];
+        println!("  ballot UTXO: {}", hex::encode(ballot_commitment));
 
         fund_from_deploy(&voter_address, VOTER_FUNDING, &format!("Voter {i}")).await?;
         let (tari_commitment, tari_nonce) =
@@ -628,8 +550,8 @@ async fn run_election(
             component,
             ballot_resource,
             &voter_address,
-            ballot_commitment,
-            ballot_nonce,
+            ballot_commitment.clone(),
+            ballot_nonce.clone(),
             tari_commitment,
             tari_nonce,
             ballots[i].clone(),
