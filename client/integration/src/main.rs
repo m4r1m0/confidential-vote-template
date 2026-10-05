@@ -4,7 +4,6 @@
 //! see `templates/confidential_voting/tests/test.rs` (in-process, no testnet needed).
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
 use indexmap::IndexSet;
 use ootle_rs::{
     Address, Network, ToAccountAddress, TransactionOutcome, TransactionRequest,
