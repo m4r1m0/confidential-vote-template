@@ -309,9 +309,13 @@ pub mod confidential_voting {
             // component.
             let mint_proof = badge_bucket.create_proof();
             let manager = ResourceManager::get(ballot_resource);
-            let minted = manager.mint_stealth(Amount::from(voter_count));
-            let _revealed_out =
-                manager.stealth_transfer_with_opt_input_bucket(mint_statement, Some(minted));
+            // Template proofs are not ambient: the mint must run inside the proof's
+            // authorization scope (required since the 0.49 engine).
+            mint_proof.authorize_with(|| {
+                let minted = manager.mint_stealth(Amount::from(voter_count));
+                let _revealed_out =
+                    manager.stealth_transfer_with_opt_input_bucket(mint_statement, Some(minted));
+            });
             mint_proof.drop();
 
             Component::new(Self {

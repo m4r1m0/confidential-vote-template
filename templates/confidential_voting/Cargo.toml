@@ -11,16 +11,16 @@ documentation = "https://github.com/m4r1m0/confidential-vote-template"
 homepage = "https://github.com/m4r1m0/confidential-vote-template"
 
 [dependencies]
-tari_template_lib = { version = "0.33" }
+tari_template_lib = { version = "0.37" }
 # The pure tally algorithms live in a standalone crate so the template can ship as a pure
 # cdylib: with a second crate-type (rlib) present, rustc silently drops `-C lto` and the
 # WASM grows ~20%. Tests link `rcv-tally` directly instead of this crate.
 rcv-tally = { path = "../../tally" }
 
 [dev-dependencies]
-tari_template_test_tooling = "0.43"
+tari_template_test_tooling = "0.49.2"
 [build-dependencies]
-tari_ootle_template_build = "0.13"
+tari_ootle_template_build = "0.17"
 
 [lib]
 crate-type = ["cdylib"]
